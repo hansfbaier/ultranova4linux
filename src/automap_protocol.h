@@ -2,7 +2,7 @@ unsigned char automap_ok[] = {
     0xf0, 0x00, 0x01, 0xf7
 };
 
-unsigned char automap_hi_too[] = {
+unsigned char automap_off[] = {
     0xf0, 0x00, 0x00, 0xf7
 };
 

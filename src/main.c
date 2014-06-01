@@ -74,16 +74,14 @@ enum {
 // state machine
 enum {
     STARTUP,
-    STARTUP1,
-    STARTUP2,
+    WAIT_FOR_AUTOMAP,
     AUTOMAP_PRESSED,
     LISTEN,
 } state = STARTUP;
 
 char *state_names[] = {
     "STARTUP",
-    "STARTUP1",
-    "STARTUP2",
+    "WAIT_FOR_AUTOMAP",
     "AUTOMAP_PRESSED",
     "LISTEN",
 };
@@ -109,13 +107,6 @@ void cb_out(struct libusb_transfer *transfer)
 {
     fprintf(stderr, "cb_out: ");
     print_libusb_transfer(transfer);
-
-    if(state == STARTUP1) {
-            libusb_fill_interrupt_transfer(transfer_out, devh, CONTROLLER_ENDPOINT_OUT,
-                                           automap_server_start_2_out, sizeof(automap_server_start_2_out), cb_out, NULL, 0);
-            libusb_submit_transfer(transfer_out);
-            state = LISTEN;
-    }
 }
 
 // In Callback
@@ -140,9 +131,24 @@ void cb_in(struct libusb_transfer *transfer)
         if(transfer->actual_length == sizeof(automap_ok) &&
            buffer_equal(automap_ok, transfer->buffer, sizeof(automap_ok))) {
             state = LISTEN;
+        } else if(transfer->actual_length == sizeof(automap_off) &&
+                  buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
+            state = WAIT_FOR_AUTOMAP;
         } else {
             fprintf(stderr, "state STARTUP, got unexpected reply\n");
             fflush(stderr);
+        }
+        break;
+
+    case WAIT_FOR_AUTOMAP:
+        if(transfer->actual_length == sizeof(automap_ok) &&
+           buffer_equal(automap_ok, transfer->buffer, sizeof(automap_ok))) {
+            libusb_fill_interrupt_transfer(transfer_out, devh, CONTROLLER_ENDPOINT_OUT,
+                                           automap_ok, sizeof(automap_ok),
+                                           cb_out, NULL, 0);
+            libusb_submit_transfer(transfer_out);
+            
+            state = LISTEN;
         }
         break;
 
@@ -151,6 +157,10 @@ void cb_in(struct libusb_transfer *transfer)
         break;
 
     case LISTEN:
+        if(transfer->actual_length == sizeof(automap_off) &&
+                  buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
+            state = WAIT_FOR_AUTOMAP;
+        }
         break;
 
     default:
