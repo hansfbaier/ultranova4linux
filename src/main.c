@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <libusb-1.0/libusb.h>
+#include <jack/jack.h>
+#include <jack/midiport.h>
+
 #include "automap_protocol.h"
 
 #define USB_VENDOR_ID            0x1235      // USB vendor ID used by the device
@@ -13,8 +16,32 @@
 #define CONTROLLER_ENDPOINT_IN   (LIBUSB_ENDPOINT_IN  | 5)   /* endpoint address */
 #define CONTROLLER_ENDPOINT_OUT  (LIBUSB_ENDPOINT_OUT | 5)   /* endpoint address */
 
+// JACK stuff
+jack_client_t *client;
+jack_port_t *output_port;
+jack_nframes_t nframes;
 
-//Global variables:
+int process(jack_nframes_t nframes, void *arg)
+{
+    int i;
+    void* port_buf = jack_port_get_buffer(output_port, nframes);
+    jack_midi_clear_buffer(port_buf);
+
+    unsigned char* buffer;
+
+    for(i=0; i<nframes; i++)
+	{
+            /*
+            buffer = jack_midi_event_reserve(port_buf, i, 3);
+            buffer[2] = 64;		// velocity 
+            buffer[1] = 0;              //pitch;
+            buffer[0] = 0x90;	        // note on 
+            */
+	}
+    return 0;
+}
+
+//USB STUFF
 struct libusb_device_handle *devh = NULL;
 #define LEN_IN_BUFFER 1024*8
 static uint8_t in_buffer[LEN_IN_BUFFER];
@@ -161,7 +188,21 @@ int main(void)
          exitflag = OUT;
          do_exit = true;
      } else  {
-         printf("Claimed interface\n");
+         fprintf(stderr, "Claimed interface\n");
+
+         // init jack
+         fprintf(stderr, "initializing jack\n");
+         if((client = jack_client_open ("ultranova", JackNullOption, NULL)) == 0) {
+             fprintf (stderr, "jack server not running?\n");
+             do_exit = true;
+         }
+         jack_set_process_callback (client, process, 0);
+         output_port = jack_port_register (client, "out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+         nframes = jack_get_buffer_size(client);
+         if (jack_activate(client)) {
+             fprintf (stderr, "cannot activate client");
+             do_exit = true;
+         }
 
          // allocate transfers
          transfer_in = libusb_alloc_transfer(0);

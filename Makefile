@@ -1,10 +1,10 @@
 OBJS :=	src/main.c
 
-CFLAGS = -g `pkg-config --cflags libusb-1.0`
-LIBS = `pkg-config --libs libusb-1.0`
+CFLAGS = -g `pkg-config --cflags jack libusb-1.0`
+LIBS = `pkg-config --libs jack libusb-1.0`
 
-ultranova4linux:	$(OBJS)
-		gcc $(CFLAGS) -o $@ $(OBJS) $(LIBS)
+ultranova4linux: $(OBJS)
+		 gcc $(CFLAGS) -o $@ $(OBJS) $(LIBS)
 
 %.o:	%.c
 	gcc $(CFLAGS) -g -Wall -c -o $@ $<
