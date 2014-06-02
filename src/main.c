@@ -15,44 +15,103 @@
 #define USB_PRODUCT_ID           0x0011      // USB product ID used by the device
 #define CONTROLLER_ENDPOINT_IN   (LIBUSB_ENDPOINT_IN  | 5)   /* endpoint address */
 #define CONTROLLER_ENDPOINT_OUT  (LIBUSB_ENDPOINT_OUT | 5)   /* endpoint address */
+#define MIDI_ENDPOINT_IN         (LIBUSB_ENDPOINT_IN  | 3)   /* endpoint address */
+#define MIDI_ENDPOINT_OUT        (LIBUSB_ENDPOINT_OUT | 3)   /* endpoint address */
 
 // JACK stuff
 jack_client_t *client;
-jack_port_t *output_port;
+jack_port_t *control_out;
+jack_port_t *midi_out;
 jack_nframes_t nframes;
+
+struct timespec diff(struct timespec start, struct timespec end);
+struct timespec last_cycle;
+struct timespec cycle_period;
+
+struct timespec control_in_t;
+struct timespec midi_in_t;
+
+
+// USB to MIDI
+struct midi_event {
+    struct timespec time;
+    uint8_t buf[3];
+};
+
+#define MAX_EVENTS 1000
+volatile bool control_buf_locked;
+volatile bool midi_buf_locked;
+volatile int control_byte_count;
+volatile int midi_byte_count;
+struct midi_event control_buf[MAX_EVENTS];
+struct midi_event midi_buf[MAX_EVENTS];
 
 int process(jack_nframes_t nframes, void *arg)
 {
+    struct timespec prev_cycle = last_cycle;
+    clock_gettime(CLOCK_REALTIME, &last_cycle);
+    cycle_period = diff(prev_cycle, last_cycle);
+    if(cycle_period.tv_nsec <= 0) {
+        return 0;
+    }
+
     int i;
-    void* port_buf = jack_port_get_buffer(output_port, nframes);
-    jack_midi_clear_buffer(port_buf);
+    void* control_buf_jack = jack_port_get_buffer(control_out, nframes);
+    jack_midi_clear_buffer(control_buf_jack);
+    void* midi_buf_jack = jack_port_get_buffer(midi_out, nframes);
+    jack_midi_clear_buffer(midi_buf_jack);
 
-    unsigned char* buffer;
+    uint8_t* buffer = NULL;
+    int control_buf_position = 0;
+    int buf_byte_pos = 0;
+    int current_event_count = control_byte_count - (control_byte_count % 3);
 
-    for(i=0; i<nframes; i++)
-	{
-            /*
-            buffer = jack_midi_event_reserve(port_buf, i, 3);
-            buffer[2] = 64;		// velocity 
-            buffer[1] = 0;              //pitch;
-            buffer[0] = 0x90;	        // note on 
-            */
-	}
-    return 0;
+    if(!control_buf_locked) {
+        control_buf_locked = true;
+        for(i=0; i < current_event_count; i++) {
+            control_buf_position = i / 3;
+            buf_byte_pos         = i % 3;
+            struct midi_event *ev = &control_buf[control_buf_position];
+
+            if(buf_byte_pos == 0) {
+                long nsec_since_start = diff(prev_cycle, ev->time).tv_nsec;
+                long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
+                buffer = jack_midi_event_reserve(control_buf_jack, framepos, 3);
+            }
+            if(buffer) {
+                buffer[buf_byte_pos] = ev->buf[buf_byte_pos];
+            }
+        }
+
+        if(i > 0 && (control_byte_count % 3) > 0) {
+            struct midi_event *current_event = &control_buf[current_event_count / 3];
+            control_buf[0].time = current_event->time;
+            control_buf[0].buf[0] = current_event->buf[0];
+            control_buf[0].buf[1] = current_event->buf[1];
+            control_buf[0].buf[2] = current_event->buf[2];
+        }
+        control_byte_count = 0;
+        control_buf_locked = false;
+    }
+
+    return nframes;
 }
 
-//USB STUFF
+// USB
 struct libusb_device_handle *devh = NULL;
-#define LEN_IN_BUFFER 1024*8
-static uint8_t in_buffer[LEN_IN_BUFFER];
+#define LEN_IN_BUFFER 32
+static uint8_t in_buffer_control[LEN_IN_BUFFER];
+static uint8_t in_buffer_midi[LEN_IN_BUFFER];
 
 #define CONTROLLER_MAXLENGTH 0x18
 
 // OUT-going transfers (OUT from host PC to USB-device)
-struct libusb_transfer *transfer_out = NULL;
+struct libusb_transfer *control_transfer_out = NULL;
+struct libusb_transfer *midi_transfer_out    = NULL;
 
 // IN-coming transfers (IN to host PC from USB-device)
-struct libusb_transfer *transfer_in = NULL;
+struct libusb_transfer *control_transfer_in = NULL;
+struct libusb_transfer *midi_transfer_in    = NULL;
 
 static libusb_context *ctx = NULL;
 
@@ -61,9 +120,6 @@ bool do_exit = false;
 // Function Prototypes:
 void sighandler(int signum);
 void print_libusb_transfer(struct libusb_transfer *p_t);
-
-
-struct timespec t1, t2;
 
 enum {
     OUT_DEINIT,
@@ -103,20 +159,17 @@ bool buffer_equal(uint8_t *expected, uint8_t *actual, int length)
 
 // Out Callback
 //   - This is called after the Out transfer has been received by libusb
-void cb_out(struct libusb_transfer *transfer)
+void cb_control_out(struct libusb_transfer *transfer)
 {
-    fprintf(stderr, "cb_out: ");
+    fprintf(stderr, "cb_control_out: ");
     print_libusb_transfer(transfer);
 }
 
-// In Callback
-//   - This is called after the command for version is processed.
-//     That is, the data for in_buffer IS AVAILABLE.
-void cb_in(struct libusb_transfer *transfer)
+
+void cb_control_in(struct libusb_transfer *transfer)
 {
-    //measure the time
-    clock_gettime(CLOCK_REALTIME, &t2);
-    fprintf(stderr, "cb_in: ");
+    clock_gettime(CLOCK_REALTIME, &control_in_t);
+    fprintf(stderr, "cb_control_in: ");
   
     print_libusb_transfer(transfer);
 
@@ -143,10 +196,10 @@ void cb_in(struct libusb_transfer *transfer)
     case WAIT_FOR_AUTOMAP:
         if(transfer->actual_length == sizeof(automap_ok) &&
            buffer_equal(automap_ok, transfer->buffer, sizeof(automap_ok))) {
-            libusb_fill_interrupt_transfer(transfer_out, devh, CONTROLLER_ENDPOINT_OUT,
+            libusb_fill_interrupt_transfer(control_transfer_out, devh, CONTROLLER_ENDPOINT_OUT,
                                            automap_ok, sizeof(automap_ok),
-                                           cb_out, NULL, 0);
-            libusb_submit_transfer(transfer_out);
+                                           cb_control_out, NULL, 0);
+            libusb_submit_transfer(control_transfer_out);
             
             state = LISTEN;
         }
@@ -158,8 +211,23 @@ void cb_in(struct libusb_transfer *transfer)
 
     case LISTEN:
         if(transfer->actual_length == sizeof(automap_off) &&
-                  buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
+           buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
             state = WAIT_FOR_AUTOMAP;
+        } else {
+            while(control_buf_locked) {
+                fprintf(stderr, "control_in busy waiting for control_buf\n");
+            }
+            int i;
+            control_buf_locked = true;
+            for(i = 0; i < transfer->actual_length; i++) {
+                int control_buf_position = control_byte_count / 3;
+                int buf_byte_pos         = control_byte_count % 3;
+                struct midi_event *ev = &control_buf[control_buf_position];
+                if(buf_byte_pos == 2) { ev->time = control_in_t; }
+                ev->buf[buf_byte_pos] = transfer->buffer[i];
+                control_byte_count++;
+            }
+            control_buf_locked = false;
         }
         break;
 
@@ -167,7 +235,20 @@ void cb_in(struct libusb_transfer *transfer)
         break;
     }
 
-    libusb_submit_transfer(transfer_in);
+    libusb_submit_transfer(control_transfer_in);
+}
+
+void cb_midi_out(struct libusb_transfer *transfer)
+{
+    fprintf(stderr, "cb_midi_out: ");
+    print_libusb_transfer(transfer);
+}
+
+void cb_midi_in(struct libusb_transfer *transfer)
+{
+    clock_gettime(CLOCK_REALTIME, &midi_in_t);
+    
+    
 }
 
 int main(void)
@@ -207,7 +288,8 @@ int main(void)
              do_exit = true;
          }
          jack_set_process_callback (client, process, 0);
-         output_port = jack_port_register (client, "out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+         control_out = jack_port_register (client, "control_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+         midi_out = jack_port_register (client, "midi_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
          nframes = jack_get_buffer_size(client);
          if (jack_activate(client)) {
              fprintf (stderr, "cannot activate client");
@@ -215,22 +297,26 @@ int main(void)
          }
 
          // allocate transfers
-         transfer_in = libusb_alloc_transfer(0);
-         transfer_out = libusb_alloc_transfer(0);
+         control_transfer_in  = libusb_alloc_transfer(0);
+         control_transfer_out = libusb_alloc_transfer(0);
+         midi_transfer_in     = libusb_alloc_transfer(0);
+         midi_transfer_out    = libusb_alloc_transfer(0);
 
-         libusb_fill_interrupt_transfer(transfer_in, devh, CONTROLLER_ENDPOINT_IN,
-                                        in_buffer, CONTROLLER_MAXLENGTH,  // Note: in_buffer is where input data written.
-                                        cb_in, NULL, 0); // no user data
+         libusb_fill_interrupt_transfer(control_transfer_in, devh, CONTROLLER_ENDPOINT_IN,
+                                        in_buffer_control, CONTROLLER_MAXLENGTH,
+                                        cb_control_in, NULL, 0);
+         libusb_fill_interrupt_transfer(midi_transfer_in, devh, MIDI_ENDPOINT_IN,
+                                        in_buffer_midi, CONTROLLER_MAXLENGTH,
+                                        cb_midi_in, NULL, 0);
 
-         //take the initial time measurement
-         clock_gettime(CLOCK_REALTIME, &t1);
          //submit the transfer, all following transfers are initiated from the CB
-         r = libusb_submit_transfer(transfer_in);
+         libusb_submit_transfer(control_transfer_in);
+         libusb_submit_transfer(midi_transfer_in);
 
-         libusb_fill_interrupt_transfer(transfer_out, devh, CONTROLLER_ENDPOINT_OUT,
+         libusb_fill_interrupt_transfer(control_transfer_out, devh, CONTROLLER_ENDPOINT_OUT,
                                         automap_ok, sizeof(automap_ok),
-                                        cb_out, NULL, 0);
-         libusb_submit_transfer(transfer_out);
+                                        cb_control_out, NULL, 0);
+         libusb_submit_transfer(control_transfer_out);
 
          // Define signal handler to catch system generated signals
          // (If user hits CTRL+C, this will deal with it.)
@@ -281,20 +367,20 @@ int main(void)
 
      // If these transfers did not complete then we cancel them.
      // Unsure if this is correct...
-     if (transfer_out) {
-         r = libusb_cancel_transfer(transfer_out);
+     if (control_transfer_out) {
+         r = libusb_cancel_transfer(control_transfer_out);
          if (0 == r) {
-             printf("transfer_out successfully cancelled\n");
+             printf("control_transfer_out successfully cancelled\n");
          }
          if (r < 0) {
              exitflag = OUT_DEINIT;
          }
 
      }
-     if (transfer_in) {
-         r = libusb_cancel_transfer(transfer_in);
+     if (control_transfer_in) {
+         r = libusb_cancel_transfer(control_transfer_in);
          if (0 == r) {
-             printf("transfer_in successfully cancelled\n");
+             printf("control_transfer_in successfully cancelled\n");
          }
          if (r < 0) {
              exitflag = OUT_DEINIT;
@@ -304,8 +390,8 @@ int main(void)
      switch(exitflag) {
      case OUT_DEINIT:
          printf("at OUT_DEINIT\n");
-         libusb_free_transfer(transfer_out);
-         libusb_free_transfer(transfer_in);
+         libusb_free_transfer(control_transfer_out);
+         libusb_free_transfer(control_transfer_in);
 
      case OUT_RELEASE:
          libusb_release_interface(devh, 0);
@@ -354,5 +440,18 @@ void print_libusb_transfer(struct libusb_transfer *p_t)
 
     fflush(stdout);
     return;
+}
+
+inline struct timespec diff(struct timespec start, struct timespec end)
+{
+	struct timespec temp;
+	if((end.tv_nsec - start.tv_nsec) < 0) {
+		temp.tv_sec  = end.tv_sec - start.tv_sec - 1;
+		temp.tv_nsec = 1000000000 + end.tv_nsec - start.tv_nsec;
+	} else {
+		temp.tv_sec  = end.tv_sec  - start.tv_sec;
+		temp.tv_nsec = end.tv_nsec - start.tv_nsec;
+	}
+	return temp;
 }
 
