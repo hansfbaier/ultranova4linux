@@ -94,7 +94,40 @@ int process(jack_nframes_t nframes, void *arg)
         control_buf_locked = false;
     }
 
-    return nframes;
+    buffer = NULL;
+    int midi_buf_position = 0;
+    buf_byte_pos = 0;
+    current_event_count = midi_byte_count - (midi_byte_count % 3);
+
+    if(!midi_buf_locked) {
+        midi_buf_locked = true;
+        for(i=0; i < current_event_count; i++) {
+            midi_buf_position = i / 3;
+            buf_byte_pos         = i % 3;
+            struct midi_event *ev = &midi_buf[midi_buf_position];
+
+            if(buf_byte_pos == 0) {
+                long nsec_since_start = diff(prev_cycle, ev->time).tv_nsec;
+                long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
+                buffer = jack_midi_event_reserve(midi_buf_jack, framepos, 3);
+            }
+            if(buffer) {
+                buffer[buf_byte_pos] = ev->buf[buf_byte_pos];
+            }
+        }
+
+        if(i > 0 && (midi_byte_count % 3) > 0) {
+            struct midi_event *current_event = &midi_buf[current_event_count / 3];
+            midi_buf[0].time = current_event->time;
+            midi_buf[0].buf[0] = current_event->buf[0];
+            midi_buf[0].buf[1] = current_event->buf[1];
+            midi_buf[0].buf[2] = current_event->buf[2];
+        }
+        midi_byte_count = 0;
+        midi_buf_locked = false;
+    }
+
+    return 0;
 }
 
 // USB
@@ -170,7 +203,6 @@ void cb_control_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &control_in_t);
     fprintf(stderr, "cb_control_in: ");
-  
     print_libusb_transfer(transfer);
 
     if(transfer->actual_length == sizeof(automap_button_press_in) &&
@@ -226,6 +258,9 @@ void cb_control_in(struct libusb_transfer *transfer)
                 if(buf_byte_pos == 2) { ev->time = control_in_t; }
                 ev->buf[buf_byte_pos] = transfer->buffer[i];
                 control_byte_count++;
+                if(control_byte_count >= MAX_EVENTS * 3) {
+                    break;
+                }
             }
             control_buf_locked = false;
         }
@@ -247,8 +282,28 @@ void cb_midi_out(struct libusb_transfer *transfer)
 void cb_midi_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &midi_in_t);
+    fprintf(stderr, "cb_midi_in: ");
+    print_libusb_transfer(transfer);
     
-    
+    while(midi_buf_locked) {
+        fprintf(stderr, "midi_in busy waiting for midi_buf\n");
+    }
+    int i;
+    midi_buf_locked = true;
+    for(i = 0; i < transfer->actual_length; i++) {
+        int midi_buf_position = midi_byte_count / 3;
+        int buf_byte_pos      = midi_byte_count % 3;
+        struct midi_event *ev = &midi_buf[midi_buf_position];
+        if(buf_byte_pos == 2) { ev->time = midi_in_t; }
+        ev->buf[buf_byte_pos] = transfer->buffer[i];
+        midi_byte_count++;
+        if(midi_byte_count >= MAX_EVENTS * 3) {
+            break;
+        }
+    }
+    midi_buf_locked = false;
+
+    libusb_submit_transfer(midi_transfer_in);
 }
 
 int main(void)
@@ -392,6 +447,7 @@ int main(void)
          printf("at OUT_DEINIT\n");
          libusb_free_transfer(control_transfer_out);
          libusb_free_transfer(control_transfer_in);
+         jack_client_close(client);
 
      case OUT_RELEASE:
          libusb_release_interface(devh, 0);
