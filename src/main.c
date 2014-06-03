@@ -21,6 +21,7 @@
 // JACK stuff
 jack_client_t *client;
 jack_port_t *control_out;
+jack_port_t *control_in;
 jack_port_t *midi_out;
 jack_nframes_t nframes;
 
@@ -46,6 +47,53 @@ volatile int midi_byte_count;
 struct midi_event control_buf[MAX_EVENTS];
 struct midi_event midi_buf[MAX_EVENTS];
 
+// USB
+struct libusb_device_handle *devh = NULL;
+#define LEN_IN_BUFFER 32
+static uint8_t in_buffer_control[LEN_IN_BUFFER];
+static uint8_t in_buffer_midi[LEN_IN_BUFFER];
+
+#define CONTROLLER_MAXLENGTH 0x18
+
+// OUT-going transfers (OUT from host PC to USB-device)
+struct libusb_transfer *control_transfer_out = NULL;
+struct libusb_transfer *midi_transfer_out    = NULL;
+
+// IN-coming transfers (IN to host PC from USB-device)
+struct libusb_transfer *control_transfer_in = NULL;
+struct libusb_transfer *midi_transfer_in    = NULL;
+
+static libusb_context *ctx = NULL;
+
+bool do_exit = false;
+
+// Function Prototypes:
+void sighandler(int signum);
+void print_libusb_transfer(struct libusb_transfer *p_t);
+void cb_control_out(struct libusb_transfer *transfer);
+
+enum {
+    OUT_DEINIT,
+    OUT_RELEASE,
+    OUT
+} exitflag;
+
+// state machine
+enum {
+    STARTUP,
+    WAIT_FOR_AUTOMAP,
+    AUTOMAP_PRESSED,
+    LISTEN,
+} state = STARTUP;
+
+char *state_names[] = {
+    "STARTUP",
+    "WAIT_FOR_AUTOMAP",
+    "AUTOMAP_PRESSED",
+    "LISTEN",
+};
+
+// functions
 int process(jack_nframes_t nframes, void *arg)
 {
     struct timespec prev_cycle = last_cycle;
@@ -56,10 +104,25 @@ int process(jack_nframes_t nframes, void *arg)
     }
 
     int i;
-    void* control_buf_jack = jack_port_get_buffer(control_out, nframes);
-    jack_midi_clear_buffer(control_buf_jack);
-    void* midi_buf_jack = jack_port_get_buffer(midi_out, nframes);
-    jack_midi_clear_buffer(midi_buf_jack);
+    void* control_buf_out_jack = jack_port_get_buffer(control_out, nframes);
+    jack_midi_clear_buffer(control_buf_out_jack);
+    void* midi_buf_out_jack = jack_port_get_buffer(midi_out, nframes);
+    jack_midi_clear_buffer(midi_buf_out_jack);
+    void* control_buf_in_jack = jack_port_get_buffer(control_in, nframes);
+ 
+    jack_midi_event_t in_event;
+    jack_nframes_t event_index = 0;
+    jack_nframes_t event_count = jack_midi_get_event_count(control_buf_in_jack);
+    for(event_index = 0; event_index < event_count; event_index++) {
+        jack_midi_event_get(&in_event, control_buf_in_jack, event_index);
+        uint8_t* outbuf = malloc(in_event.size);
+        memcpy(outbuf, in_event.buffer, in_event.size);
+        struct libusb_transfer *transfer = libusb_alloc_transfer(0);
+        libusb_fill_interrupt_transfer(transfer, devh, CONTROLLER_ENDPOINT_OUT,
+                                       outbuf, in_event.size,
+                                       cb_control_out, outbuf, 0);
+        libusb_submit_transfer(transfer);
+    }
 
     uint8_t* buffer = NULL;
     int control_buf_position = 0;
@@ -81,7 +144,7 @@ int process(jack_nframes_t nframes, void *arg)
                 if(framepos <= last_framepos) {
                     framepos = last_framepos + 1;
                 }
-                buffer = jack_midi_event_reserve(control_buf_jack, framepos, 3);
+                buffer = jack_midi_event_reserve(control_buf_out_jack, framepos, 3);
                 last_framepos = framepos;
             }
             if(buffer) {
@@ -122,7 +185,7 @@ int process(jack_nframes_t nframes, void *arg)
                 if(framepos <= last_framepos) {
                     framepos = last_framepos + 1;
                 }
-                buffer = jack_midi_event_reserve(midi_buf_jack, framepos, 3);
+                buffer = jack_midi_event_reserve(midi_buf_out_jack, framepos, 3);
                 last_framepos = framepos;
             }
             if(buffer) {
@@ -145,50 +208,6 @@ int process(jack_nframes_t nframes, void *arg)
     return 0;
 }
 
-// USB
-struct libusb_device_handle *devh = NULL;
-#define LEN_IN_BUFFER 32
-static uint8_t in_buffer_control[LEN_IN_BUFFER];
-static uint8_t in_buffer_midi[LEN_IN_BUFFER];
-
-#define CONTROLLER_MAXLENGTH 0x18
-
-// OUT-going transfers (OUT from host PC to USB-device)
-struct libusb_transfer *control_transfer_out = NULL;
-struct libusb_transfer *midi_transfer_out    = NULL;
-
-// IN-coming transfers (IN to host PC from USB-device)
-struct libusb_transfer *control_transfer_in = NULL;
-struct libusb_transfer *midi_transfer_in    = NULL;
-
-static libusb_context *ctx = NULL;
-
-bool do_exit = false;
-
-// Function Prototypes:
-void sighandler(int signum);
-void print_libusb_transfer(struct libusb_transfer *p_t);
-
-enum {
-    OUT_DEINIT,
-    OUT_RELEASE,
-    OUT
-} exitflag;
-
-// state machine
-enum {
-    STARTUP,
-    WAIT_FOR_AUTOMAP,
-    AUTOMAP_PRESSED,
-    LISTEN,
-} state = STARTUP;
-
-char *state_names[] = {
-    "STARTUP",
-    "WAIT_FOR_AUTOMAP",
-    "AUTOMAP_PRESSED",
-    "LISTEN",
-};
 
 bool buffer_equal(uint8_t *expected, uint8_t *actual, int length)
 {
@@ -211,6 +230,8 @@ void cb_control_out(struct libusb_transfer *transfer)
 {
     fprintf(stderr, "cb_control_out: ");
     print_libusb_transfer(transfer);
+    free(transfer->user_data);
+    libusb_free_transfer(transfer);
 }
 
 
@@ -381,9 +402,12 @@ int main(void)
              fprintf (stderr, "jack server not running?\n");
              do_exit = true;
          }
+
          jack_set_process_callback (client, process, 0);
          control_out = jack_port_register (client, "control_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
-         midi_out = jack_port_register (client, "midi_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+         control_in  = jack_port_register (client, "control_in",  JACK_DEFAULT_MIDI_TYPE, JackPortIsInput,  0);
+         midi_out    = jack_port_register (client, "midi_out",    JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+
          nframes = jack_get_buffer_size(client);
          if (jack_activate(client)) {
              fprintf (stderr, "cannot activate client");
