@@ -68,6 +68,8 @@ int process(jack_nframes_t nframes, void *arg)
 
     if(!control_buf_locked) {
         control_buf_locked = true;
+        jack_nframes_t last_framepos = 0;
+
         for(i=0; i < current_event_count; i++) {
             control_buf_position = i / 3;
             buf_byte_pos         = i % 3;
@@ -76,7 +78,11 @@ int process(jack_nframes_t nframes, void *arg)
             if(buf_byte_pos == 0) {
                 long nsec_since_start = diff(prev_cycle, ev->time).tv_nsec;
                 long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
+                if(framepos <= last_framepos) {
+                    framepos = last_framepos + 1;
+                }
                 buffer = jack_midi_event_reserve(control_buf_jack, framepos, 3);
+                last_framepos = framepos;
             }
             if(buffer) {
                 buffer[buf_byte_pos] = ev->buf[buf_byte_pos];
@@ -92,6 +98,7 @@ int process(jack_nframes_t nframes, void *arg)
         }
 
         control_byte_count %= 3;
+
         control_buf_locked = false;
     }
 
@@ -102,6 +109,8 @@ int process(jack_nframes_t nframes, void *arg)
 
     if(!midi_buf_locked) {
         midi_buf_locked = true;
+        jack_nframes_t last_framepos = 0;
+
         for(i=0; i < current_event_count; i++) {
             midi_buf_position = i / 3;
             buf_byte_pos         = i % 3;
@@ -110,7 +119,11 @@ int process(jack_nframes_t nframes, void *arg)
             if(buf_byte_pos == 0) {
                 long nsec_since_start = diff(prev_cycle, ev->time).tv_nsec;
                 long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
+                if(framepos <= last_framepos) {
+                    framepos = last_framepos + 1;
+                }
                 buffer = jack_midi_event_reserve(midi_buf_jack, framepos, 3);
+                last_framepos = framepos;
             }
             if(buffer) {
                 buffer[buf_byte_pos] = ev->buf[buf_byte_pos];
@@ -305,6 +318,7 @@ void cb_midi_in(struct libusb_transfer *transfer)
     }
     midi_buf_locked = false;
 
+ out:
     libusb_submit_transfer(midi_transfer_in);
 }
 
