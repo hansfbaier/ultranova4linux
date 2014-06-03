@@ -294,11 +294,34 @@ void cb_midi_out(struct libusb_transfer *transfer)
     print_libusb_transfer(transfer);
 }
 
+volatile bool aftertouch_seen = false;
+
+#define IS_AFTERTOUCH(a) (((a) & 0xf0) == 0xd0)
+
 void cb_midi_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &midi_in_t);
     fprintf(stderr, "cb_midi_in: ");
     print_libusb_transfer(transfer);
+
+    int no_bytes = transfer->actual_length;
+    if(IS_AFTERTOUCH(transfer->buffer[0])) {
+        if(no_bytes == 1) {
+            aftertouch_seen = true;
+        }
+
+        // TODO: convert ultranovas aftertouch messages
+        // into MIDI standard conformant (if possible?)
+        // but discard for now
+        goto out;
+    } else {
+        if(aftertouch_seen && no_bytes == 1) {
+            aftertouch_seen = false;
+            goto out;
+        }
+    }
+
+    aftertouch_seen = false;
     
     while(midi_buf_locked) {
         fprintf(stderr, "midi_in busy waiting for midi_buf\n");
