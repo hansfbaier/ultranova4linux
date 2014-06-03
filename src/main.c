@@ -90,7 +90,8 @@ int process(jack_nframes_t nframes, void *arg)
             control_buf[0].buf[1] = current_event->buf[1];
             control_buf[0].buf[2] = current_event->buf[2];
         }
-        control_byte_count = 0;
+
+        control_byte_count %= 3;
         control_buf_locked = false;
     }
 
@@ -123,7 +124,8 @@ int process(jack_nframes_t nframes, void *arg)
             midi_buf[0].buf[1] = current_event->buf[1];
             midi_buf[0].buf[2] = current_event->buf[2];
         }
-        midi_byte_count = 0;
+
+        midi_byte_count %= 3;
         midi_buf_locked = false;
     }
 
