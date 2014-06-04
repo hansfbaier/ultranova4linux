@@ -24,6 +24,9 @@
 
 using namespace std;
 
+// controller state
+char encoder_states[10];
+
 // JACK stuff
 jack_client_t *client;
 jack_port_t *controller_out;
@@ -123,6 +126,17 @@ size_t midi_event_size(uint8_t firstByte)
     return result;
 }
 
+inline int clamp_to(int value, int from, int to)
+{
+    if(value > to) {
+        value = to;
+    }
+    if(value < from) {
+        value = from;
+    }
+    return value;
+}
+
 void pickup_from_queue(queue<midi_message_t>& queue,
                        void *jack_midi_buffer,
                        struct timespec& prev_cycle,
@@ -142,6 +156,17 @@ void pickup_from_queue(queue<midi_message_t>& queue,
 
         if(framepos >= nframes) {
             framepos = nframes - 1;
+        }
+
+        #define AUTOMAP_ENCODERS 0xb0
+        if(msg.buffer[0] == AUTOMAP_ENCODERS) {
+            int encoder_number = msg.buffer[1];
+            int value = msg.buffer[2];
+            if(64 <= value && value <= 127) {
+                value = value - 128;
+            }
+            encoder_states[encoder_number] = clamp_to((int)encoder_states[encoder_number] + value, 0, 127);
+            msg.buffer[2] = encoder_states[encoder_number];
         }
 
         uint8_t *buffer = jack_midi_event_reserve(jack_midi_buffer, framepos, msg.buffer.size());
