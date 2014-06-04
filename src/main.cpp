@@ -314,9 +314,6 @@ void cb_controller_in(struct libusb_transfer *transfer)
     print_libusb_transfer(transfer);
 
     static midi_message_t msg;
-    if(msg.buffer.size()) {
-        fprintf(stderr, "pending controller message size: %d\n", msg.buffer.size());
-    }
 
     if(transfer->actual_length == sizeof(automap_button_press_in) &&
        buffer_equal(automap_ok, transfer->buffer, sizeof(automap_button_press_in))) {
@@ -377,6 +374,10 @@ void cb_controller_in(struct libusb_transfer *transfer)
         break;
     }
 
+    if(msg.buffer.size()) {
+        fprintf(stderr, "pending controller message size: %d\n\n", msg.buffer.size());
+    }
+
     libusb_submit_transfer(controller_transfer_in);
 }
 
@@ -396,13 +397,14 @@ void cb_midi_in(struct libusb_transfer *transfer)
     print_libusb_transfer(transfer);
 
     static midi_message_t msg;
-    if(msg.buffer.size()) {
-        fprintf(stderr, "pending midi message size: %d\n", msg.buffer.size());
-    }
 
     G_LOCK(midi_queue);
     process_incoming(transfer, midi_in_t, msg, midi_queue);
     G_UNLOCK(midi_queue);
+
+    if(msg.buffer.size()) {
+        fprintf(stderr, "pending midi message size: %d\n\n", msg.buffer.size());
+    }
 
     libusb_submit_transfer(midi_transfer_in);
 }
