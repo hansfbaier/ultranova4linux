@@ -4,7 +4,11 @@
 
 #include <signal.h>
 #include <stdio.h>
-#include <stdbool.h>
+#include <string.h>
+#include <time.h>
+#include <vector>
+#include <queue>
+#include <glib.h>
 #include <libusb-1.0/libusb.h>
 #include <jack/jack.h>
 #include <jack/midiport.h>
@@ -17,6 +21,8 @@
 #define CONTROLLER_ENDPOINT_OUT  (LIBUSB_ENDPOINT_OUT | 5)   /* endpoint address */
 #define MIDI_ENDPOINT_IN         (LIBUSB_ENDPOINT_IN  | 3)   /* endpoint address */
 #define MIDI_ENDPOINT_OUT        (LIBUSB_ENDPOINT_OUT | 3)   /* endpoint address */
+
+using namespace std;
 
 // JACK stuff
 jack_client_t *client;
@@ -32,20 +38,16 @@ struct timespec cycle_period;
 struct timespec control_in_t;
 struct timespec midi_in_t;
 
+#define SMALL_BUF_SIZE 4
+typedef struct midi_message {
+    struct timespec time;
+    vector<uint8_t> buffer;
+} midi_message_t;
+
 
 // USB to MIDI
-struct midi_event {
-    struct timespec time;
-    uint8_t buf[3];
-};
-
-#define MAX_EVENTS 1000
-volatile bool control_buf_locked;
-volatile bool midi_buf_locked;
-volatile int control_byte_count;
-volatile int midi_byte_count;
-struct midi_event control_buf[MAX_EVENTS];
-struct midi_event midi_buf[MAX_EVENTS];
+G_LOCK_DEFINE(midi_queue);
+queue<midi_message_t> midi_queue;
 
 // USB
 struct libusb_device_handle *devh = NULL;
@@ -93,6 +95,33 @@ char *state_names[] = {
     "LISTEN",
 };
 
+size_t midi_event_size(uint8_t firstByte)
+{
+    size_t result = 3;
+
+    uint8_t firstNibble = firstByte & 0xf0;
+    if(firstNibble == 0xc0 ||
+       firstNibble == 0xd0 ||
+       firstByte == 0xf3) {
+        result = 2;
+    }
+
+    uint8_t secondNibble = 0x0f & firstByte;
+    if(firstNibble == 0xf0 &&
+       secondNibble != 0 &&
+       secondNibble != 2 &&
+       secondNibble != 3) {
+        result = 1;
+    }
+
+    if(firstByte == 0xf0) {
+        return 0;
+    }
+
+    return result;
+}
+
+
 // functions
 int process(jack_nframes_t nframes, void *arg)
 {
@@ -115,7 +144,7 @@ int process(jack_nframes_t nframes, void *arg)
     jack_nframes_t event_count = jack_midi_get_event_count(control_buf_in_jack);
     for(event_index = 0; event_index < event_count; event_index++) {
         jack_midi_event_get(&in_event, control_buf_in_jack, event_index);
-        uint8_t* outbuf = malloc(in_event.size);
+        uint8_t* outbuf = (uint8_t*) malloc(in_event.size);
         memcpy(outbuf, in_event.buffer, in_event.size);
         struct libusb_transfer *transfer = libusb_alloc_transfer(0);
         libusb_fill_interrupt_transfer(transfer, devh, CONTROLLER_ENDPOINT_OUT,
@@ -124,86 +153,33 @@ int process(jack_nframes_t nframes, void *arg)
         libusb_submit_transfer(transfer);
     }
 
-    uint8_t* buffer = NULL;
-    int control_buf_position = 0;
-    int buf_byte_pos = 0;
-    int current_event_count = control_byte_count - (control_byte_count % 3);
+    G_LOCK(midi_queue);
+    jack_nframes_t last_framepos = 0;
 
-    if(!control_buf_locked) {
-        control_buf_locked = true;
-        jack_nframes_t last_framepos = 0;
-
-        for(i=0; i < current_event_count; i++) {
-            control_buf_position = i / 3;
-            buf_byte_pos         = i % 3;
-            struct midi_event *ev = &control_buf[control_buf_position];
-
-            if(buf_byte_pos == 0) {
-                long nsec_since_start = diff(prev_cycle, ev->time).tv_nsec;
-                long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
-                if(framepos <= last_framepos) {
-                    framepos = last_framepos + 1;
-                }
-                buffer = jack_midi_event_reserve(control_buf_out_jack, framepos, 3);
-                last_framepos = framepos;
-            }
-            if(buffer) {
-                buffer[buf_byte_pos] = ev->buf[buf_byte_pos];
-            }
+    while(!midi_queue.empty()) {
+        midi_message_t msg = midi_queue.front();
+        long nsec_since_start = diff(prev_cycle, msg.time).tv_nsec;
+        long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
+        if(framepos <= last_framepos) {
+            framepos = last_framepos + 1;
         }
 
-        if(i > 0 && (control_byte_count % 3) > 0) {
-            struct midi_event *current_event = &control_buf[current_event_count / 3];
-            control_buf[0].time = current_event->time;
-            control_buf[0].buf[0] = current_event->buf[0];
-            control_buf[0].buf[1] = current_event->buf[1];
-            control_buf[0].buf[2] = current_event->buf[2];
+        if(framepos >= nframes) {
+            framepos = nframes - 1;
         }
 
-        control_byte_count %= 3;
+        uint8_t *buffer = jack_midi_event_reserve(midi_buf_out_jack, framepos, msg.buffer.size());
+        if(buffer) {
+            memcpy(buffer, msg.buffer.data(), msg.buffer.size());
+        } else {
+            fprintf(stderr, "failed to allocate %d bytes midi buffer at framepos %ld (nframes = %d)",
+                    msg.buffer.size(), framepos, nframes);
+        }
 
-        control_buf_locked = false;
+        midi_queue.pop();
     }
 
-    buffer = NULL;
-    int midi_buf_position = 0;
-    buf_byte_pos = 0;
-    current_event_count = midi_byte_count - (midi_byte_count % 3);
-
-    if(!midi_buf_locked) {
-        midi_buf_locked = true;
-        jack_nframes_t last_framepos = 0;
-
-        for(i=0; i < current_event_count; i++) {
-            midi_buf_position = i / 3;
-            buf_byte_pos         = i % 3;
-            struct midi_event *ev = &midi_buf[midi_buf_position];
-
-            if(buf_byte_pos == 0) {
-                long nsec_since_start = diff(prev_cycle, ev->time).tv_nsec;
-                long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
-                if(framepos <= last_framepos) {
-                    framepos = last_framepos + 1;
-                }
-                buffer = jack_midi_event_reserve(midi_buf_out_jack, framepos, 3);
-                last_framepos = framepos;
-            }
-            if(buffer) {
-                buffer[buf_byte_pos] = ev->buf[buf_byte_pos];
-            }
-        }
-
-        if(i > 0 && (midi_byte_count % 3) > 0) {
-            struct midi_event *current_event = &midi_buf[current_event_count / 3];
-            midi_buf[0].time = current_event->time;
-            midi_buf[0].buf[0] = current_event->buf[0];
-            midi_buf[0].buf[1] = current_event->buf[1];
-            midi_buf[0].buf[2] = current_event->buf[2];
-        }
-
-        midi_byte_count %= 3;
-        midi_buf_locked = false;
-    }
+    G_UNLOCK(midi_queue);
 
     return 0;
 }
@@ -282,23 +258,6 @@ void cb_control_in(struct libusb_transfer *transfer)
            buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
             state = WAIT_FOR_AUTOMAP;
         } else {
-            while(control_buf_locked) {
-                fprintf(stderr, "control_in busy waiting for control_buf\n");
-            }
-            int i;
-            control_buf_locked = true;
-            for(i = 0; i < transfer->actual_length; i++) {
-                int control_buf_position = control_byte_count / 3;
-                int buf_byte_pos         = control_byte_count % 3;
-                struct midi_event *ev = &control_buf[control_buf_position];
-                if(buf_byte_pos == 2) { ev->time = control_in_t; }
-                ev->buf[buf_byte_pos] = transfer->buffer[i];
-                control_byte_count++;
-                if(control_byte_count >= MAX_EVENTS * 3) {
-                    break;
-                }
-            }
-            control_buf_locked = false;
         }
         break;
 
@@ -325,44 +284,69 @@ void cb_midi_in(struct libusb_transfer *transfer)
     fprintf(stderr, "cb_midi_in: ");
     print_libusb_transfer(transfer);
 
-    int no_bytes = transfer->actual_length;
-    if(IS_AFTERTOUCH(transfer->buffer[0])) {
-        if(no_bytes == 1) {
-            aftertouch_seen = true;
+    static midi_message_t msg;
+    if(msg.buffer.size()) {
+        fprintf(stderr, "pending midi message size: %d\n", msg.buffer.size());
+    }
+
+    int transfer_size = transfer->actual_length;
+    int pos = 0;
+
+    G_LOCK(midi_queue);
+    while(pos < transfer_size) {
+        int event_size = 0;
+        if(msg.buffer.empty()) {
+            event_size = midi_event_size(transfer->buffer[pos]);
+        } else {
+            event_size = midi_event_size(msg.buffer[0]);
         }
 
-        // TODO: convert ultranovas aftertouch messages
-        // into MIDI standard conformant (if possible?)
-        // but discard for now
-        goto out;
-    } else {
-        if(aftertouch_seen && no_bytes == 1) {
-            aftertouch_seen = false;
-            goto out;
+        if(event_size) {
+            int i;
+            int remaining_size = event_size - msg.buffer.size();
+
+            if(pos + remaining_size > transfer_size) {
+                int i;
+                for(i = pos; i < transfer_size; i++) {
+                    msg.buffer.push_back(transfer->buffer[i]);
+                }
+                pos = i;
+                // we're done
+                break;
+            } else if (0 < remaining_size && pos + remaining_size <= transfer_size) {
+                for(i = pos; i < pos + remaining_size; i++) {
+                    msg.buffer.push_back(transfer->buffer[i]);
+                }
+                pos = i;
+                g_assert(event_size == msg.buffer.size());
+                msg.time = midi_in_t;
+                midi_queue.emplace(msg);
+                msg.buffer.clear();
+                continue;
+            } else {
+                fprintf(stderr, "ERROR, invalid remaining size\n");
+            }
+        } else {
+            // sysex
+            int i;
+            for(i = pos; i < transfer_size; i++) {
+                if(transfer->buffer[i] != 0xf7) {
+                    msg.buffer.push_back(transfer->buffer[i]);
+                } else {
+                    msg.buffer.push_back(0xf7);
+                    msg.time = midi_in_t;
+                    midi_queue.emplace(msg);
+                    msg.buffer.clear();
+                    pos = i;
+                    continue;
+                }
+            }
+            pos = i;
         }
     }
 
-    aftertouch_seen = false;
-    
-    while(midi_buf_locked) {
-        fprintf(stderr, "midi_in busy waiting for midi_buf\n");
-    }
-    int i;
-    midi_buf_locked = true;
-    for(i = 0; i < transfer->actual_length; i++) {
-        int midi_buf_position = midi_byte_count / 3;
-        int buf_byte_pos      = midi_byte_count % 3;
-        struct midi_event *ev = &midi_buf[midi_buf_position];
-        if(buf_byte_pos == 2) { ev->time = midi_in_t; }
-        ev->buf[buf_byte_pos] = transfer->buffer[i];
-        midi_byte_count++;
-        if(midi_byte_count >= MAX_EVENTS * 3) {
-            break;
-        }
-    }
-    midi_buf_locked = false;
+    G_UNLOCK(midi_queue);
 
- out:
     libusb_submit_transfer(midi_transfer_in);
 }
 
