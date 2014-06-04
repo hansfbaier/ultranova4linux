@@ -324,6 +324,13 @@ void cb_controller_in(struct libusb_transfer *transfer)
                                            automap_ok, sizeof(automap_ok),
                                            cb_controller_out, NULL, 0);
             libusb_submit_transfer(transfer);
+
+            transfer = libusb_alloc_transfer(0);
+            libusb_fill_interrupt_transfer(transfer, devh, CONTROLLER_ENDPOINT_OUT,
+                                           ultranova4linux_greeting,
+                                           sizeof(ultranova4linux_greeting),
+                                           cb_controller_out, NULL, 0);
+            libusb_submit_transfer(transfer);
         }
         break;
 

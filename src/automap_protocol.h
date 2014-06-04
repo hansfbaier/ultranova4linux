@@ -9,3 +9,7 @@ unsigned char automap_off[] = {
 unsigned char automap_button_press_in[] = {
     0xb0, 0x63, 0x3e, 0xb0, 0x62, 0x00, 0xb0, 0x06, 0x00
 };
+
+unsigned char ultranova4linux_greeting[] = {
+    0xf0, 0x02, 0, 30, 'u', 'l', 't', 'r', 'a', 'n', 'o', 'v', 'a', '4', 'l', 'i', 'n', 'u', 'x', 0xf7
+};
