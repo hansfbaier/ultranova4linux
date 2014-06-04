@@ -304,7 +304,6 @@ void cb_controller_out(struct libusb_transfer *transfer)
 {
     fprintf(stderr, "cb_controller_out: ");
     print_libusb_transfer(transfer);
-    free(transfer->user_data);
     libusb_free_transfer(transfer);
 }
 
