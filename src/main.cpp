@@ -32,6 +32,7 @@ jack_client_t *client;
 jack_port_t *controller_out;
 jack_port_t *controller_in;
 jack_port_t *midi_out;
+jack_port_t *midi_in;
 jack_nframes_t nframes;
 
 struct timespec diff(struct timespec start, struct timespec end);
@@ -63,9 +64,6 @@ static uint8_t in_buffer_midi[LEN_IN_BUFFER];
 
 #define CONTROLLER_MAXLENGTH 0x18
 
-// OUT-going transfers (OUT from host PC to USB-device)
-struct libusb_transfer *midi_transfer_out    = NULL;
-
 // IN-coming transfers (IN to host PC from USB-device)
 struct libusb_transfer *controller_transfer_in = NULL;
 struct libusb_transfer *midi_transfer_in    = NULL;
@@ -78,6 +76,7 @@ bool do_exit = false;
 void sighandler(int signum);
 void print_libusb_transfer(struct libusb_transfer *p_t);
 void cb_controller_out(struct libusb_transfer *transfer);
+void cb_midi_out(struct libusb_transfer *transfer);
 
 enum exitflag_t {
     OUT_DEINIT,
@@ -181,6 +180,25 @@ void pickup_from_queue(queue<midi_message_t>& queue,
     }
 }
 
+void jack_to_usb(void *jack_midi_buffer, jack_port_t *jack_port, int endpoint, libusb_transfer_cb_fn callback)
+{
+    jack_midi_event_t in_event;
+    jack_nframes_t event_index = 0;
+    jack_nframes_t event_count = jack_midi_get_event_count(jack_midi_buffer);
+
+    for(event_index = 0; event_index < event_count; event_index++) {
+        jack_midi_event_get(&in_event, jack_midi_buffer, event_index);
+
+        uint8_t* outbuf = (uint8_t*) malloc(in_event.size);
+        memcpy(outbuf, in_event.buffer, in_event.size);
+        struct libusb_transfer *transfer = libusb_alloc_transfer(0);
+        libusb_fill_interrupt_transfer(transfer, devh, endpoint,
+                                       outbuf, in_event.size,
+                                       callback, outbuf, 0);
+        libusb_submit_transfer(transfer);
+    }
+}
+
 int process(jack_nframes_t nframes, void *arg)
 {
     struct timespec prev_cycle = last_cycle;
@@ -198,22 +216,10 @@ int process(jack_nframes_t nframes, void *arg)
     jack_midi_clear_buffer(midi_buf_out_jack);
 
     void* controller_buf_in_jack = jack_port_get_buffer(controller_in, nframes);
- 
-    jack_midi_event_t in_event;
-    jack_nframes_t event_index = 0;
-    jack_nframes_t event_count = jack_midi_get_event_count(controller_buf_in_jack);
+    jack_to_usb(controller_buf_in_jack, controller_in, CONTROLLER_ENDPOINT_OUT, cb_controller_out);
 
-    for(event_index = 0; event_index < event_count; event_index++) {
-        jack_midi_event_get(&in_event, controller_buf_in_jack, event_index);
-
-        uint8_t* outbuf = (uint8_t*) malloc(in_event.size);
-        memcpy(outbuf, in_event.buffer, in_event.size);
-        struct libusb_transfer *transfer = libusb_alloc_transfer(0);
-        libusb_fill_interrupt_transfer(transfer, devh, CONTROLLER_ENDPOINT_OUT,
-                                       outbuf, in_event.size,
-                                       cb_controller_out, outbuf, 0);
-        libusb_submit_transfer(transfer);
-    }
+    void* midi_buf_in_jack = jack_port_get_buffer(midi_in, nframes);
+    jack_to_usb(midi_buf_in_jack, midi_in, MIDI_ENDPOINT_OUT, cb_midi_out);
 
     G_LOCK(controller_queue);
     pickup_from_queue(controller_queue, controller_buf_out_jack, prev_cycle, cycle_period, nframes);
@@ -298,11 +304,16 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
     }
 }
 
-// Out Callback
-//   - This is called after the Out transfer has been received by libusb
 void cb_controller_out(struct libusb_transfer *transfer)
 {
     fprintf(stderr, "cb_controller_out: ");
+    print_libusb_transfer(transfer);
+    libusb_free_transfer(transfer);
+}
+
+void cb_midi_out(struct libusb_transfer *transfer)
+{
+    fprintf(stderr, "cb_midi_out: ");
     print_libusb_transfer(transfer);
     libusb_free_transfer(transfer);
 }
@@ -381,12 +392,6 @@ void cb_controller_in(struct libusb_transfer *transfer)
     libusb_submit_transfer(controller_transfer_in);
 }
 
-void cb_midi_out(struct libusb_transfer *transfer)
-{
-    fprintf(stderr, "cb_midi_out: ");
-    print_libusb_transfer(transfer);
-}
-
 volatile bool aftertouch_seen = false;
 
 #define IS_AFTERTOUCH(a) (((a) & 0xf0) == 0xd0)
@@ -450,6 +455,7 @@ int main(void)
          controller_out = jack_port_register (client, "controller_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
          controller_in  = jack_port_register (client, "controller_in",  JACK_DEFAULT_MIDI_TYPE, JackPortIsInput,  0);
          midi_out    = jack_port_register (client, "midi_out",    JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+         midi_in     = jack_port_register (client, "midi_in",     JACK_DEFAULT_MIDI_TYPE, JackPortIsInput,  0);
 
          nframes = jack_get_buffer_size(client);
          if (jack_activate(client)) {
@@ -460,7 +466,6 @@ int main(void)
          // allocate transfers
          controller_transfer_in  = libusb_alloc_transfer(0);
          midi_transfer_in        = libusb_alloc_transfer(0);
-         midi_transfer_out       = libusb_alloc_transfer(0);
 
          libusb_fill_interrupt_transfer(controller_transfer_in, devh, CONTROLLER_ENDPOINT_IN,
                                         in_buffer_control, CONTROLLER_MAXLENGTH,
@@ -531,7 +536,6 @@ int main(void)
          printf("at OUT_DEINIT\n");
          libusb_free_transfer(controller_transfer_in);
          libusb_free_transfer(midi_transfer_in);
-         libusb_free_transfer(midi_transfer_out);
          jack_client_close(client);
 
      case OUT_RELEASE:
