@@ -282,7 +282,10 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
                 msg.buffer.clear();
                 continue;
             } else {
-                fprintf(stderr, "ERROR, invalid remaining size\n");
+                fprintf(stderr, "ERROR, invalid remaining size %d\n", remaining_size);
+                msg.buffer.clear();
+                pos++;
+                continue;
             }
         } else {
             // sysex
