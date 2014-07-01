@@ -8,7 +8,8 @@
 #include <time.h>
 #include <vector>
 #include <queue>
-#include <glib.h>
+#include <boost/thread/mutex.hpp>
+#include <boost/assert.hpp>
 #include <libusb-1.0/libusb.h>
 #include <jack/jack.h>
 #include <jack/midiport.h>
@@ -50,10 +51,10 @@ typedef struct {
 
 
 // USB to MIDI
-G_LOCK_DEFINE(midi_queue);
+boost::mutex midi_mutex;
 queue<midi_message_t> midi_queue;
 
-G_LOCK_DEFINE(controller_queue);
+boost::mutex controller_mutex;
 queue<midi_message_t> controller_queue;
 
 // USB
@@ -221,13 +222,13 @@ int process(jack_nframes_t nframes, void *arg)
     void* midi_buf_in_jack = jack_port_get_buffer(midi_in, nframes);
     jack_to_usb(midi_buf_in_jack, midi_in, MIDI_ENDPOINT_OUT, cb_midi_out);
 
-    G_LOCK(controller_queue);
+    controller_mutex.lock();
     pickup_from_queue(controller_queue, controller_buf_out_jack, prev_cycle, cycle_period, nframes);
-    G_UNLOCK(controller_queue);
+    controller_mutex.unlock();
 
-    G_LOCK(midi_queue);
+    midi_mutex.lock();
     pickup_from_queue(midi_queue, midi_buf_out_jack, prev_cycle, cycle_period, nframes);
-    G_UNLOCK(midi_queue);
+    midi_mutex.unlock();
 
     return 0;
 }
@@ -276,7 +277,7 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
                     msg.buffer.push_back(transfer->buffer[i]);
                 }
                 pos = i;
-                g_assert(event_size == msg.buffer.size());
+                BOOST_ASSERT(event_size == msg.buffer.size());
                 msg.time = time;
                 queue.push(msg);
                 msg.buffer.clear();
@@ -378,9 +379,9 @@ void cb_controller_in(struct libusb_transfer *transfer)
            buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
             state = WAIT_FOR_AUTOMAP;
         } else {
-            G_LOCK(controller_queue);
+            controller_mutex.lock();
             process_incoming(transfer, controller_in_t, msg, controller_queue);
-            G_UNLOCK(controller_queue);
+            controller_mutex.unlock();
         }
         break;
 
@@ -406,9 +407,9 @@ void cb_midi_in(struct libusb_transfer *transfer)
 
     static midi_message_t msg;
 
-    G_LOCK(midi_queue);
+    midi_mutex.lock();
     process_incoming(transfer, midi_in_t, msg, midi_queue);
-    G_UNLOCK(midi_queue);
+    midi_mutex.unlock();
 
     if(msg.buffer.size()) {
         fprintf(stderr, "pending midi message size: %d\n\n", msg.buffer.size());
