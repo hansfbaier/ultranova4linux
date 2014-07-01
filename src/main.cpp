@@ -159,7 +159,10 @@ void pickup_from_queue(queue<midi_message_t>& queue,
         }
 
         #define AUTOMAP_ENCODERS 0xb0
-        if(msg.buffer[0] == AUTOMAP_ENCODERS) {
+        if(state == LISTEN &&
+           &queue == &controller_queue &&
+           msg.buffer[0] == AUTOMAP_ENCODERS &&
+           msg.buffer[1] < 10) {
             int encoder_number = msg.buffer[1];
             int value = msg.buffer[2];
             if(64 <= value && value <= 127) {
