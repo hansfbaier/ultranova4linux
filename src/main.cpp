@@ -547,8 +547,6 @@ int main(int argc, char *argv[])
      switch(exitflag) {
      case OUT_DEINIT:
          printf("at OUT_DEINIT\n");
-         libusb_free_transfer(controller_transfer_in);
-         libusb_free_transfer(midi_transfer_in);
          jack_client_close(client);
 
      case OUT_RELEASE:
