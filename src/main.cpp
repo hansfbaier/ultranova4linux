@@ -25,6 +25,8 @@
 
 using namespace std;
 
+static bool debug = false;
+
 // controller state
 char encoder_states[10];
 
@@ -313,7 +315,7 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
 
 void cb_controller_out(struct libusb_transfer *transfer)
 {
-    fprintf(stderr, "cb_controller_out: ");
+    debug && fprintf(stderr, "cb_controller_out: ");
     print_libusb_transfer(transfer);
     libusb_free_transfer(transfer);
 }
@@ -328,7 +330,7 @@ void cb_midi_out(struct libusb_transfer *transfer)
 void cb_controller_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &controller_in_t);
-    fprintf(stderr, "cb_controller_in: ");
+    debug && fprintf(stderr, "cb_controller_in: ");
     print_libusb_transfer(transfer);
 
     static midi_message_t msg;
@@ -405,7 +407,7 @@ volatile bool aftertouch_seen = false;
 void cb_midi_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &midi_in_t);
-    fprintf(stderr, "cb_midi_in: ");
+    debug && fprintf(stderr, "cb_midi_in: ");
     print_libusb_transfer(transfer);
 
     static midi_message_t msg;
@@ -414,15 +416,19 @@ void cb_midi_in(struct libusb_transfer *transfer)
     process_incoming(transfer, midi_in_t, msg, midi_queue);
     midi_mutex.unlock();
 
-    if(msg.buffer.size()) {
+    if(msg.buffer.size() && debug) {
         fprintf(stderr, "pending midi message size: %d\n\n", msg.buffer.size());
     }
 
     libusb_submit_transfer(midi_transfer_in);
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
+    if (argc == 2 && strcmp(argv[1], "--debug") == 0) {
+        debug = true;
+    }
+
     struct sigaction sigact;
 
     int r = 1;  // result
@@ -565,8 +571,12 @@ void sighandler(int signum)
 
 
 // debugging function to display libusb_transfer
-void print_libusb_transfer(struct libusb_transfer *p_t)
+inline void print_libusb_transfer(struct libusb_transfer *p_t)
 {   
+    if (!debug) {
+        return;
+    }
+
     int i;
     if (NULL == p_t) {
         printf("No libusb_transfer...\n");
