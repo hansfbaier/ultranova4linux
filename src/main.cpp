@@ -449,9 +449,12 @@ int main(int argc, char *argv[])
      }
 
      //claim the interface
-     r = libusb_claim_interface(devh, 0);
-     if (r < 0) {
-         fprintf(stderr, "usb_claim_interface error %d\n", r);
+     bool success =
+        libusb_claim_interface(devh, 0) >= 0 &&
+        libusb_claim_interface(devh, 1) >= 0 &&
+        libusb_claim_interface(devh, 3) >= 0;
+     if (!success) {
+         fprintf(stderr, "usb_claim_interface error\n");
          exitflag = OUT;
          do_exit = true;
      } else  {
@@ -551,6 +554,8 @@ int main(int argc, char *argv[])
 
      case OUT_RELEASE:
          libusb_release_interface(devh, 0);
+         libusb_release_interface(devh, 1);
+         libusb_release_interface(devh, 3);
 
      case OUT:
          libusb_close(devh);
