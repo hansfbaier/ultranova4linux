@@ -322,7 +322,7 @@ void cb_controller_out(struct libusb_transfer *transfer)
 
 void cb_midi_out(struct libusb_transfer *transfer)
 {
-    fprintf(stderr, "cb_midi_out: ");
+    debug && fprintf(stderr, "cb_midi_out: ");
     print_libusb_transfer(transfer);
     libusb_free_transfer(transfer);
 }
