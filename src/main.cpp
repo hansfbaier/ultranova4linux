@@ -17,16 +17,24 @@
 
 #include "automap_protocol.h"
 
-#define USB_VENDOR_ID            0x1235      // USB vendor ID used by the device
-#define USB_PRODUCT_ID           0x0011      // USB product ID used by the device
-#define CONTROLLER_ENDPOINT_IN   (LIBUSB_ENDPOINT_IN  | 5)   /* endpoint address */
-#define CONTROLLER_ENDPOINT_OUT  (LIBUSB_ENDPOINT_OUT | 5)   /* endpoint address */
-#define MIDI_ENDPOINT_IN         (LIBUSB_ENDPOINT_IN  | 3)   /* endpoint address */
-#define MIDI_ENDPOINT_OUT        (LIBUSB_ENDPOINT_OUT | 3)   /* endpoint address */
+#define USB_VENDOR_ID                0x1235
+#define ULTRANOVA_PRODUCT_ID         0x0011
+#define MININOVA_PRODUCT_ID          0x001e
+
+#define CONTROLLER_ENDPOINT_IN       (LIBUSB_ENDPOINT_IN  | 5)
+#define CONTROLLER_ENDPOINT_OUT      (LIBUSB_ENDPOINT_OUT | 5)
+#define ULTRANOVA_MIDI_ENDPOINT_IN   (LIBUSB_ENDPOINT_IN  | 3)
+#define ULTRANOVA_MIDI_ENDPOINT_OUT  (LIBUSB_ENDPOINT_OUT | 3)
+#define MININOVA_MIDI_ENDPOINT_IN    (LIBUSB_ENDPOINT_IN  | 1)
+#define MININOVA_MIDI_ENDPOINT_OUT   (LIBUSB_ENDPOINT_OUT | 2)
+
+int midi_endpoint_in  = ULTRANOVA_MIDI_ENDPOINT_IN;
+int midi_endpoint_out = ULTRANOVA_MIDI_ENDPOINT_OUT;
 
 using namespace std;
 
-static bool debug = false;
+static bool debug     = false;
+static bool ultranova = true;
 
 // controller state
 char encoder_states[10];
@@ -70,7 +78,7 @@ static uint8_t in_buffer_midi[LEN_IN_BUFFER];
 
 // IN-coming transfers (IN to host PC from USB-device)
 struct libusb_transfer *controller_transfer_in = NULL;
-struct libusb_transfer *midi_transfer_in    = NULL;
+struct libusb_transfer *midi_transfer_in       = NULL;
 
 static libusb_context *ctx = NULL;
 
@@ -285,21 +293,29 @@ int process(jack_nframes_t nframes, void *arg)
     }
 
     int i;
-    void* controller_buf_out_jack = jack_port_get_buffer(controller_out, nframes);
-    jack_midi_clear_buffer(controller_buf_out_jack);
+
+    void* controller_buf_out_jack;
+    if (ultranova) {
+        controller_buf_out_jack = jack_port_get_buffer(controller_out, nframes);
+        jack_midi_clear_buffer(controller_buf_out_jack);
+    }
 
     void* midi_buf_out_jack = jack_port_get_buffer(midi_out, nframes);
     jack_midi_clear_buffer(midi_buf_out_jack);
 
-    void* controller_buf_in_jack = jack_port_get_buffer(controller_in, nframes);
-    jack_to_usb(controller_buf_in_jack, controller_in, CONTROLLER_ENDPOINT_OUT, cb_controller_out);
+    if (ultranova) {
+        void* controller_buf_in_jack = jack_port_get_buffer(controller_in, nframes);
+        jack_to_usb(controller_buf_in_jack, controller_in, CONTROLLER_ENDPOINT_OUT, cb_controller_out);
+    }
 
     void* midi_buf_in_jack = jack_port_get_buffer(midi_in, nframes);
-    jack_to_usb(midi_buf_in_jack, midi_in, MIDI_ENDPOINT_OUT, cb_midi_out);
+    jack_to_usb(midi_buf_in_jack, midi_in, midi_endpoint_out, cb_midi_out);
 
-    controller_mutex.lock();
-    pickup_from_queue(controller_queue, controller_buf_out_jack, prev_cycle, cycle_period, nframes);
-    controller_mutex.unlock();
+    if (ultranova) {
+        controller_mutex.lock();
+        pickup_from_queue(controller_queue, controller_buf_out_jack, prev_cycle, cycle_period, nframes);
+        controller_mutex.unlock();
+    }
 
     midi_mutex.lock();
     pickup_from_queue(midi_queue, midi_buf_out_jack, prev_cycle, cycle_period, nframes);
@@ -518,131 +534,157 @@ int main(int argc, char *argv[])
     }
 
     //open the device
-    devh = libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, USB_PRODUCT_ID);
-     if (!devh) {
-         perror("device not found");
-         return 1;
-     }
+    devh = libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, ULTRANOVA_PRODUCT_ID);
 
-     //claim the interface
-     bool success =
-        libusb_claim_interface(devh, 0) >= 0 &&
-        libusb_claim_interface(devh, 1) >= 0 &&
-        libusb_claim_interface(devh, 3) >= 0;
-     if (!success) {
-         fprintf(stderr, "usb_claim_interface error\n");
-         exitflag = OUT;
-         do_exit = true;
-     } else  {
-         fprintf(stderr, "Claimed interface\n");
+    if (!devh) {
+        devh = libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, MININOVA_PRODUCT_ID);
+        if (!devh) {
+            perror("neither Novation Ultranova nor Novation Mininova found");
+            return 1;
+        }
 
-         // init OSC
-         if (control_ardour) {
-             ardour = lo_address_new_from_url("osc.udp://localhost:3819/");
-         }
-
-         // init jack
-         fprintf(stderr, "initializing jack\n");
-         if((client = jack_client_open ("ultranova", JackNullOption, NULL)) == 0) {
-             fprintf (stderr, "jack server not running?\n");
-             do_exit = true;
-         }
-
-         jack_set_process_callback (client, process, 0);
-         controller_out = jack_port_register (client, "controller_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
-         controller_in  = jack_port_register (client, "controller_in",  JACK_DEFAULT_MIDI_TYPE, JackPortIsInput,  0);
-         midi_out    = jack_port_register (client, "midi_out",    JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
-         midi_in     = jack_port_register (client, "midi_in",     JACK_DEFAULT_MIDI_TYPE, JackPortIsInput,  0);
-
-         nframes = jack_get_buffer_size(client);
-         if (jack_activate(client)) {
-             fprintf (stderr, "cannot activate client");
-             do_exit = true;
-         }
-
-         // allocate transfers
-         controller_transfer_in  = libusb_alloc_transfer(0);
-         midi_transfer_in        = libusb_alloc_transfer(0);
-
-         libusb_fill_interrupt_transfer(controller_transfer_in, devh, CONTROLLER_ENDPOINT_IN,
-                                        in_buffer_control, CONTROLLER_MAXLENGTH,
-                                        cb_controller_in, NULL, 0);
-         libusb_fill_interrupt_transfer(midi_transfer_in, devh, MIDI_ENDPOINT_IN,
-                                        in_buffer_midi, CONTROLLER_MAXLENGTH,
-                                        cb_midi_in, NULL, 0);
-
-         //submit the transfer, all following transfers are initiated from the CB
-         libusb_submit_transfer(controller_transfer_in);
-         libusb_submit_transfer(midi_transfer_in);
-
-         struct libusb_transfer *transfer = libusb_alloc_transfer(0);
-         libusb_fill_interrupt_transfer(transfer, devh, CONTROLLER_ENDPOINT_OUT,
-                                        automap_ok, sizeof(automap_ok),
-                                        cb_controller_out, NULL, 0);
-         libusb_submit_transfer(transfer);
-
-         // Define signal handler to catch system generated signals
-         // (If user hits CTRL+C, this will deal with it.)
-         sigact.sa_handler = sighandler;  // sighandler is defined below. It just sets do_exit.
-         sigemptyset(&sigact.sa_mask);
-         sigact.sa_flags = 0;
-         sigaction(SIGINT, &sigact, NULL);
-         sigaction(SIGTERM, &sigact, NULL);
-         sigaction(SIGQUIT, &sigact, NULL);
-
-         printf("Entering loop to process callbacks...\n");
+        // we have a mininova
+        ultranova = false;
+        midi_endpoint_in  = MININOVA_MIDI_ENDPOINT_IN;
+        midi_endpoint_out = MININOVA_MIDI_ENDPOINT_OUT;
     }
 
-    /* The implementation of the following while loop makes a huge difference.
-     * Since libUSB asynchronous mode doesn't create a background thread,
-     * libUSB can't create a callback out of nowhere. This loop calls the event handler.
-     * In real applications you might want to create a background thread or call the event
-     * handler from your main event hanlder.
-     * For a proper description see:
-     * http://libusbx.sourceforge.net/api-1.0/group__asyncio.html#asyncevent
-     * http://libusbx.sourceforge.net/api-1.0/group__poll.html
-     * http://libusbx.sourceforge.net/api-1.0/mtasync.html
-     */
-     if(1) {
-         // This implementation uses a blocking call
-         while (!do_exit) {
-             r = libusb_handle_events_completed(ctx, NULL);
-             if (r < 0){   // negative values are errors
-                 exitflag = OUT_DEINIT;
-                 break;
-             }
-         }
-     } else {
-         // This implementation uses a blocking call and aquires a lock to the event handler
-         struct timeval timeout;
-         timeout.tv_sec  = 0;       // seconds
-         timeout.tv_usec = 100000;  // ( .1 sec)
-         libusb_lock_events(ctx);
-         while (!do_exit) {
-             r = libusb_handle_events_locked(ctx, &timeout);
-             if (r < 0){   // negative values are errors
-                 exitflag = OUT_DEINIT;
-                 break;
-             }
-         }
-         libusb_unlock_events(ctx);
-     }
+    //claim the interface
+    bool success = ultranova ?
+       (libusb_claim_interface(devh, 0) >= 0 &&
+        libusb_claim_interface(devh, 1) >= 0 &&
+        libusb_claim_interface(devh, 3) >= 0)
+       :
+       (libusb_claim_interface(devh, 0) >= 0);
 
-     switch(exitflag) {
-     case OUT_DEINIT:
-         printf("at OUT_DEINIT\n");
-         jack_client_close(client);
+    if (!success) {
+        fprintf(stderr, "usb_claim_interface error\n");
+        exitflag = OUT;
+        do_exit = true;
+    } else  {
+        fprintf(stderr, "Claimed interface\n");
 
-     case OUT_RELEASE:
-         libusb_release_interface(devh, 0);
-         libusb_release_interface(devh, 1);
-         libusb_release_interface(devh, 3);
+        // init OSC
+        if (ultranova && control_ardour) {
+            ardour = lo_address_new_from_url("osc.udp://localhost:3819/");
+        }
 
-     case OUT:
-         libusb_close(devh);
-         libusb_exit(NULL);
-     }
-     return 0;
+        // init jack
+        fprintf(stderr, "initializing jack\n");
+        if ((client = jack_client_open (ultranova ? "ultranova" : "mininova", JackNullOption, NULL)) == 0) {
+            fprintf (stderr, "jack server not running?\n");
+            do_exit = true;
+        }
+
+        jack_set_process_callback (client, process, 0);
+
+        if (ultranova) {
+            controller_out = jack_port_register (client, "controller_out", JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+            controller_in  = jack_port_register (client, "controller_in",  JACK_DEFAULT_MIDI_TYPE, JackPortIsInput,  0);
+        }
+
+        midi_out    = jack_port_register (client, "midi_out",    JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+        midi_in     = jack_port_register (client, "midi_in",     JACK_DEFAULT_MIDI_TYPE, JackPortIsInput,  0);
+
+        nframes = jack_get_buffer_size(client);
+        if (jack_activate(client)) {
+            fprintf (stderr, "cannot activate client");
+            do_exit = true;
+        }
+
+        // allocate transfers
+        if (ultranova) {
+            controller_transfer_in = libusb_alloc_transfer(0);
+        }
+        midi_transfer_in = libusb_alloc_transfer(0);
+
+        if (ultranova) {
+            libusb_fill_interrupt_transfer(controller_transfer_in, devh, CONTROLLER_ENDPOINT_IN,
+                                           in_buffer_control, CONTROLLER_MAXLENGTH,
+                                           cb_controller_in, NULL, 0);
+        }
+        libusb_fill_interrupt_transfer(midi_transfer_in, devh, midi_endpoint_in,
+                                       in_buffer_midi, LEN_IN_BUFFER,
+                                       cb_midi_in, NULL, 0);
+
+        //submit the transfer, all following transfers are initiated from the CB
+        if (ultranova) {
+            libusb_submit_transfer(controller_transfer_in);
+        }
+        libusb_submit_transfer(midi_transfer_in);
+
+        if (ultranova) {
+            struct libusb_transfer *transfer = libusb_alloc_transfer(0);
+            libusb_fill_interrupt_transfer(transfer, devh, CONTROLLER_ENDPOINT_OUT,
+                                           automap_ok, sizeof(automap_ok),
+                                           cb_controller_out, NULL, 0);
+            libusb_submit_transfer(transfer);
+        }
+
+        // Define signal handler to catch system generated signals
+        // (If user hits CTRL+C, this will deal with it.)
+        sigact.sa_handler = sighandler;  // sighandler is defined below. It just sets do_exit.
+        sigemptyset(&sigact.sa_mask);
+        sigact.sa_flags = 0;
+        sigaction(SIGINT, &sigact, NULL);
+        sigaction(SIGTERM, &sigact, NULL);
+        sigaction(SIGQUIT, &sigact, NULL);
+
+        printf("Entering loop to process callbacks...\n");
+    }
+
+   /* The implementation of the following while loop makes a huge difference.
+    * Since libUSB asynchronous mode doesn't create a background thread,
+    * libUSB can't create a callback out of nowhere. This loop calls the event handler.
+    * In real applications you might want to create a background thread or call the event
+    * handler from your main event hanlder.
+    * For a proper description see:
+    * http://libusbx.sourceforge.net/api-1.0/group__asyncio.html#asyncevent
+    * http://libusbx.sourceforge.net/api-1.0/group__poll.html
+    * http://libusbx.sourceforge.net/api-1.0/mtasync.html
+    */
+    if(1) {
+        // This implementation uses a blocking call
+        while (!do_exit) {
+            r = libusb_handle_events_completed(ctx, NULL);
+            if (r < 0){   // negative values are errors
+                exitflag = OUT_DEINIT;
+                break;
+            }
+        }
+    } else {
+        // This implementation uses a blocking call and aquires a lock to the event handler
+        struct timeval timeout;
+        timeout.tv_sec  = 0;       // seconds
+        timeout.tv_usec = 100000;  // ( .1 sec)
+        libusb_lock_events(ctx);
+        while (!do_exit) {
+            r = libusb_handle_events_locked(ctx, &timeout);
+            if (r < 0){   // negative values are errors
+                exitflag = OUT_DEINIT;
+                break;
+            }
+        }
+        libusb_unlock_events(ctx);
+    }
+
+    switch(exitflag) {
+    case OUT_DEINIT:
+        printf("at OUT_DEINIT\n");
+        jack_client_close(client);
+
+    case OUT_RELEASE:
+        libusb_release_interface(devh, 0);
+        if (ultranova) {
+            libusb_release_interface(devh, 1);
+            libusb_release_interface(devh, 3);
+        }
+
+    case OUT:
+        libusb_close(devh);
+        libusb_exit(NULL);
+    }
+    return 0;
 }
 
 
