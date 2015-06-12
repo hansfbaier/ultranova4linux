@@ -13,6 +13,7 @@
 #include <libusb-1.0/libusb.h>
 #include <jack/jack.h>
 #include <jack/midiport.h>
+#include <lo/lo.h>
 
 #include "automap_protocol.h"
 
@@ -72,6 +73,11 @@ struct libusb_transfer *controller_transfer_in = NULL;
 struct libusb_transfer *midi_transfer_in    = NULL;
 
 static libusb_context *ctx = NULL;
+
+// OSC
+lo_address ardour;
+uint8_t ardour_mute_states;
+uint8_t ardour_recen_states;
 
 bool do_exit = false;
 
@@ -139,6 +145,80 @@ inline int clamp_to(int value, int from, int to)
     return value;
 }
 
+#define AUTOMAP_ENCODERS 0xb0
+#define AUTOMAP_BUTTONS 0xb2
+void process_controller_out_message(midi_message_t& msg)
+{
+    if(msg.buffer[0] == AUTOMAP_ENCODERS && msg.buffer[1] < 10) {
+        int encoder_number = msg.buffer[1];
+        int value = msg.buffer[2];
+        if(64 <= value && value <= 127) {
+            value = value - 128;
+        }
+        encoder_states[encoder_number] = clamp_to((int)encoder_states[encoder_number] + value, 0, 127);
+        msg.buffer[2] = encoder_states[encoder_number];
+
+        if(ardour && encoder_number <= 8) {
+            int target_id = encoder_number == 8 ? 318 : encoder_number + 1;
+            lo_send(ardour, "/ardour/routes/gainabs", "if", target_id, 2.0 * ((float)msg.buffer[2])/127.0);
+        }
+    }
+
+    if(msg.buffer[0] == AUTOMAP_BUTTONS) {
+        msg.buffer[2] = msg.buffer[2] ? 127 : 0;
+        uint8_t value = msg.buffer[2];
+        uint8_t button = msg.buffer[1];
+
+        if(ardour) {
+            if(button <= 7 && value) {
+               if(value) {
+                 ardour_mute_states ^= 1 << button;
+                 lo_send(ardour, "/ardour/routes/mute", "ii", button + 1, (ardour_mute_states & (1 << button)) ? 1 : 0);
+               }
+            }
+            button == 0x1d && lo_send(ardour, "/ardour/transport_stop", "");
+            button == 0x1e && lo_send(ardour, "/ardour/transport_play", "");
+
+            if(value) {
+                button == 0x20 && lo_send(ardour, "/ardour/loop_toggle", "");
+                button == 0x22 && lo_send(ardour, "/ardour/rec_enable_toggle", "");
+                if(button == 0x13) {
+                    ardour_recen_states ^= 1 << 0;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 1, (ardour_recen_states & (1 << 0)) ? 1 : 0);
+                }
+                if(button == 0x15) {
+                    ardour_recen_states ^= 1 << 1;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 2, (ardour_recen_states & (1 << 1)) ? 1 : 0);
+                }
+                if(button == 0x17) {
+                    ardour_recen_states ^= 1 << 2;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 3, (ardour_recen_states & (1 << 2)) ? 1 : 0);
+                }
+                if(button == 0x19) {
+                    ardour_recen_states ^= 1 << 3;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 4, (ardour_recen_states & (1 << 3)) ? 1 : 0);
+                }
+                if(button == 0x1a) {
+                    ardour_recen_states ^= 1 << 4;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 5, (ardour_recen_states & (1 << 4)) ? 1 : 0);
+                }
+                if(button == 0x1c) {
+                    ardour_recen_states ^= 1 << 5;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 6, (ardour_recen_states & (1 << 5)) ? 1 : 0);
+                }
+                if(button == 0x1f) {
+                    ardour_recen_states ^= 1 << 6;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 7, (ardour_recen_states & (1 << 6)) ? 1 : 0);
+                }
+                if(button == 0x21) {
+                    ardour_recen_states ^= 1 << 7;
+                    lo_send(ardour, "/ardour/routes/recenable", "ii", 8, (ardour_recen_states & (1 << 7)) ? 1 : 0);
+                }
+            }
+        }
+    }
+}
+
 void pickup_from_queue(queue<midi_message_t>& queue,
                        void *jack_midi_buffer,
                        struct timespec& prev_cycle,
@@ -160,18 +240,8 @@ void pickup_from_queue(queue<midi_message_t>& queue,
             framepos = nframes - 1;
         }
 
-        #define AUTOMAP_ENCODERS 0xb0
-        if(state == LISTEN &&
-           &queue == &controller_queue &&
-           msg.buffer[0] == AUTOMAP_ENCODERS &&
-           msg.buffer[1] < 10) {
-            int encoder_number = msg.buffer[1];
-            int value = msg.buffer[2];
-            if(64 <= value && value <= 127) {
-                value = value - 128;
-            }
-            encoder_states[encoder_number] = clamp_to((int)encoder_states[encoder_number] + value, 0, 127);
-            msg.buffer[2] = encoder_states[encoder_number];
+        if(state == LISTEN && &queue == &controller_queue) {
+            process_controller_out_message(msg);
         }
 
         uint8_t *buffer = jack_midi_event_reserve(jack_midi_buffer, framepos, msg.buffer.size());
@@ -425,8 +495,14 @@ void cb_midi_in(struct libusb_transfer *transfer)
 
 int main(int argc, char *argv[])
 {
-    if (argc == 2 && strcmp(argv[1], "--debug") == 0) {
-        debug = true;
+    bool control_ardour = false;
+
+    for(int i = 0; i < argc; i++){
+        if (strcmp(argv[i], "--debug") == 0) {
+            debug = true;
+        } else if (strcmp(argv[i], "--ardour-osc") == 0) {
+            control_ardour = true;
+        }
     }
 
     struct sigaction sigact;
@@ -459,6 +535,11 @@ int main(int argc, char *argv[])
          do_exit = true;
      } else  {
          fprintf(stderr, "Claimed interface\n");
+
+         // init OSC
+         if (control_ardour) {
+             ardour = lo_address_new_from_url("osc.udp://localhost:3819/");
+         }
 
          // init jack
          fprintf(stderr, "initializing jack\n");

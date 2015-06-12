@@ -1,7 +1,7 @@
 OBJS :=	src/main.cpp
 
-CFLAGS = -g `pkg-config --cflags jack libusb-1.0`
-LIBS = `pkg-config --libs jack libusb-1.0` -lrt -lboost_system
+CFLAGS = -g `pkg-config --cflags jack libusb-1.0 liblo`
+LIBS = `pkg-config --libs jack libusb-1.0 liblo` -lrt -lboost_system
 
 ultranova4linux: $(OBJS)
 		 g++ $(CFLAGS) -o $@ $(OBJS) $(LIBS)
