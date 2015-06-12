@@ -121,21 +121,21 @@ size_t midi_event_size(uint8_t firstByte)
     size_t result = 3;
 
     uint8_t firstNibble = firstByte & 0xf0;
-    if(firstNibble == 0xc0 ||
-       firstNibble == 0xd0 ||
-       firstByte == 0xf3) {
+    if (firstNibble == 0xc0 ||
+        firstNibble == 0xd0 ||
+        firstByte == 0xf3) {
         result = 2;
     }
 
     uint8_t secondNibble = 0x0f & firstByte;
-    if(firstNibble == 0xf0 &&
-       secondNibble != 0 &&
-       secondNibble != 2 &&
-       secondNibble != 3) {
+    if (firstNibble == 0xf0 &&
+        secondNibble != 0 &&
+        secondNibble != 2 &&
+        secondNibble != 3) {
         result = 1;
     }
 
-    if(firstByte == 0xf0) {
+    if (firstByte == 0xf0) {
         return 0;
     }
 
@@ -144,10 +144,10 @@ size_t midi_event_size(uint8_t firstByte)
 
 inline int clamp_to(int value, int from, int to)
 {
-    if(value > to) {
+    if (value > to) {
         value = to;
     }
-    if(value < from) {
+    if (value < from) {
         value = from;
     }
     return value;
@@ -157,29 +157,29 @@ inline int clamp_to(int value, int from, int to)
 #define AUTOMAP_BUTTONS 0xb2
 void process_controller_out_message(midi_message_t& msg)
 {
-    if(msg.buffer[0] == AUTOMAP_ENCODERS && msg.buffer[1] < 10) {
+    if (msg.buffer[0] == AUTOMAP_ENCODERS && msg.buffer[1] < 10) {
         int encoder_number = msg.buffer[1];
         int value = msg.buffer[2];
-        if(64 <= value && value <= 127) {
+        if (64 <= value && value <= 127) {
             value = value - 128;
         }
         encoder_states[encoder_number] = clamp_to((int)encoder_states[encoder_number] + value, 0, 127);
         msg.buffer[2] = encoder_states[encoder_number];
 
-        if(ardour && encoder_number <= 8) {
+        if (ardour && encoder_number <= 8) {
             int target_id = encoder_number == 8 ? 318 : encoder_number + 1;
             lo_send(ardour, "/ardour/routes/gainabs", "if", target_id, 2.0 * ((float)msg.buffer[2])/127.0);
         }
     }
 
-    if(msg.buffer[0] == AUTOMAP_BUTTONS) {
+    if (msg.buffer[0] == AUTOMAP_BUTTONS) {
         msg.buffer[2] = msg.buffer[2] ? 127 : 0;
         uint8_t value = msg.buffer[2];
         uint8_t button = msg.buffer[1];
 
-        if(ardour) {
-            if(button <= 7 && value) {
-               if(value) {
+        if (ardour) {
+            if (button <= 7 && value) {
+               if (value) {
                  ardour_mute_states ^= 1 << button;
                  lo_send(ardour, "/ardour/routes/mute", "ii", button + 1, (ardour_mute_states & (1 << button)) ? 1 : 0);
                }
@@ -187,38 +187,38 @@ void process_controller_out_message(midi_message_t& msg)
             button == 0x1d && lo_send(ardour, "/ardour/transport_stop", "");
             button == 0x1e && lo_send(ardour, "/ardour/transport_play", "");
 
-            if(value) {
+            if (value) {
                 button == 0x20 && lo_send(ardour, "/ardour/loop_toggle", "");
                 button == 0x22 && lo_send(ardour, "/ardour/rec_enable_toggle", "");
-                if(button == 0x13) {
+                if (button == 0x13) {
                     ardour_recen_states ^= 1 << 0;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 1, (ardour_recen_states & (1 << 0)) ? 1 : 0);
                 }
-                if(button == 0x15) {
+                if (button == 0x15) {
                     ardour_recen_states ^= 1 << 1;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 2, (ardour_recen_states & (1 << 1)) ? 1 : 0);
                 }
-                if(button == 0x17) {
+                if (button == 0x17) {
                     ardour_recen_states ^= 1 << 2;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 3, (ardour_recen_states & (1 << 2)) ? 1 : 0);
                 }
-                if(button == 0x19) {
+                if (button == 0x19) {
                     ardour_recen_states ^= 1 << 3;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 4, (ardour_recen_states & (1 << 3)) ? 1 : 0);
                 }
-                if(button == 0x1a) {
+                if (button == 0x1a) {
                     ardour_recen_states ^= 1 << 4;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 5, (ardour_recen_states & (1 << 4)) ? 1 : 0);
                 }
-                if(button == 0x1c) {
+                if (button == 0x1c) {
                     ardour_recen_states ^= 1 << 5;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 6, (ardour_recen_states & (1 << 5)) ? 1 : 0);
                 }
-                if(button == 0x1f) {
+                if (button == 0x1f) {
                     ardour_recen_states ^= 1 << 6;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 7, (ardour_recen_states & (1 << 6)) ? 1 : 0);
                 }
-                if(button == 0x21) {
+                if (button == 0x21) {
                     ardour_recen_states ^= 1 << 7;
                     lo_send(ardour, "/ardour/routes/recenable", "ii", 8, (ardour_recen_states & (1 << 7)) ? 1 : 0);
                 }
@@ -240,20 +240,20 @@ void pickup_from_queue(queue<midi_message_t>& queue,
         midi_message_t msg = queue.front();
         long nsec_since_start = diff(prev_cycle, msg.time).tv_nsec;
         long framepos = (nsec_since_start * nframes) / cycle_period.tv_nsec;
-        if(framepos <= last_framepos) {
+        if (framepos <= last_framepos) {
             framepos = last_framepos + 1;
         }
 
-        if(framepos >= nframes) {
+        if (framepos >= nframes) {
             framepos = nframes - 1;
         }
 
-        if(state == LISTEN && &queue == &controller_queue) {
+        if (state == LISTEN && &queue == &controller_queue) {
             process_controller_out_message(msg);
         }
 
         uint8_t *buffer = jack_midi_event_reserve(jack_midi_buffer, framepos, msg.buffer.size());
-        if(buffer) {
+        if (buffer) {
             memcpy(buffer, msg.buffer.data(), msg.buffer.size());
         } else {
             fprintf(stderr, "failed to allocate %d bytes midi buffer at framepos %ld (nframes = %d)",
@@ -288,7 +288,7 @@ int process(jack_nframes_t nframes, void *arg)
     struct timespec prev_cycle = last_cycle;
     clock_gettime(CLOCK_REALTIME, &last_cycle);
     cycle_period = diff(prev_cycle, last_cycle);
-    if(cycle_period.tv_nsec <= 0) {
+    if (cycle_period.tv_nsec <= 0) {
         return 0;
     }
 
@@ -330,7 +330,7 @@ bool buffer_equal(uint8_t *expected, uint8_t *actual, int length)
     int i;
 
     for(i = 0; i < length; i++) {
-        if(expected[i] != actual[i]) {
+        if (expected[i] != actual[i]) {
             return false;
         }
     }
@@ -345,17 +345,17 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
 
     while(pos < transfer_size) {
         int event_size = 0;
-        if(msg.buffer.empty()) {
+        if (msg.buffer.empty()) {
             event_size = midi_event_size(transfer->buffer[pos]);
         } else {
             event_size = midi_event_size(msg.buffer[0]);
         }
 
-        if(event_size) {
+        if (event_size) {
             int i;
             int remaining_size = event_size - msg.buffer.size();
 
-            if(pos + remaining_size > transfer_size) {
+            if (pos + remaining_size > transfer_size) {
                 int i;
                 for(i = pos; i < transfer_size; i++) {
                     msg.buffer.push_back(transfer->buffer[i]);
@@ -383,7 +383,7 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
             // sysex
             int i;
             for(i = pos; i < transfer_size; i++) {
-                if(transfer->buffer[i] != 0xf7) {
+                if (transfer->buffer[i] != 0xf7) {
                     msg.buffer.push_back(transfer->buffer[i]);
                 } else {
                     msg.buffer.push_back(0xf7);
@@ -421,7 +421,7 @@ void cb_controller_in(struct libusb_transfer *transfer)
 
     static midi_message_t msg;
 
-    if(transfer->actual_length == sizeof(automap_button_press_in) &&
+    if (transfer->actual_length == sizeof(automap_button_press_in) &&
        buffer_equal(automap_ok, transfer->buffer, sizeof(automap_button_press_in))) {
         state = AUTOMAP_PRESSED;
         fprintf(stderr, "AUTOMAP PRESSED\n");
@@ -429,10 +429,10 @@ void cb_controller_in(struct libusb_transfer *transfer)
 
     switch(state) {
     case STARTUP:
-        if(transfer->actual_length == sizeof(automap_ok) &&
+        if (transfer->actual_length == sizeof(automap_ok) &&
            buffer_equal(automap_ok, transfer->buffer, sizeof(automap_ok))) {
             state = LISTEN;
-        } else if(transfer->actual_length == sizeof(automap_off) &&
+        } else if (transfer->actual_length == sizeof(automap_off) &&
                   buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
             state = WAIT_FOR_AUTOMAP;
         } else {
@@ -442,7 +442,7 @@ void cb_controller_in(struct libusb_transfer *transfer)
         break;
 
     case WAIT_FOR_AUTOMAP:
-        if(transfer->actual_length == sizeof(automap_ok) &&
+        if (transfer->actual_length == sizeof(automap_ok) &&
            buffer_equal(automap_ok, transfer->buffer, sizeof(automap_ok))) {
             state = LISTEN;
 
@@ -466,7 +466,7 @@ void cb_controller_in(struct libusb_transfer *transfer)
         break;
 
     case LISTEN:
-        if(transfer->actual_length == sizeof(automap_off) &&
+        if (transfer->actual_length == sizeof(automap_off) &&
            buffer_equal(automap_off, transfer->buffer, sizeof(automap_off))) {
             state = WAIT_FOR_AUTOMAP;
         } else {
@@ -480,7 +480,7 @@ void cb_controller_in(struct libusb_transfer *transfer)
         break;
     }
 
-    if(msg.buffer.size()) {
+    if (msg.buffer.size()) {
         fprintf(stderr, "pending controller message size: %d\n\n", msg.buffer.size());
     }
 
@@ -502,7 +502,7 @@ void cb_midi_in(struct libusb_transfer *transfer)
     process_incoming(transfer, midi_in_t, msg, midi_queue);
     midi_mutex.unlock();
 
-    if(msg.buffer.size() && debug) {
+    if (msg.buffer.size() && debug) {
         fprintf(stderr, "pending midi message size: %d\n\n", msg.buffer.size());
     }
 
@@ -643,7 +643,7 @@ int main(int argc, char *argv[])
     * http://libusbx.sourceforge.net/api-1.0/group__poll.html
     * http://libusbx.sourceforge.net/api-1.0/mtasync.html
     */
-    if(1) {
+    if (1) {
         // This implementation uses a blocking call
         while (!do_exit) {
             r = libusb_handle_events_completed(ctx, NULL);
@@ -733,7 +733,7 @@ inline void print_libusb_transfer(struct libusb_transfer *p_t)
 inline struct timespec diff(struct timespec start, struct timespec end)
 {
 	struct timespec temp;
-	if((end.tv_nsec - start.tv_nsec) < 0) {
+	if ((end.tv_nsec - start.tv_nsec) < 0) {
 		temp.tv_sec  = end.tv_sec - start.tv_sec - 1;
 		temp.tv_nsec = 1000000000 + end.tv_nsec - start.tv_nsec;
 	} else {
