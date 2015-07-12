@@ -270,7 +270,7 @@ void jack_to_usb(void *jack_midi_buffer, jack_port_t *jack_port, int endpoint, l
     jack_nframes_t event_index = 0;
     jack_nframes_t event_count = jack_midi_get_event_count(jack_midi_buffer);
 
-    for(event_index = 0; event_index < event_count; event_index++) {
+    for (event_index = 0; event_index < event_count; event_index++) {
         jack_midi_event_get(&in_event, jack_midi_buffer, event_index);
 
         uint8_t* outbuf = (uint8_t*) malloc(in_event.size);
@@ -329,7 +329,7 @@ bool buffer_equal(uint8_t *expected, uint8_t *actual, int length)
 {
     int i;
 
-    for(i = 0; i < length; i++) {
+    for (i = 0; i < length; i++) {
         if (expected[i] != actual[i]) {
             return false;
         }
@@ -341,48 +341,75 @@ bool buffer_equal(uint8_t *expected, uint8_t *actual, int length)
 void process_incoming(struct libusb_transfer *transfer, struct timespec time, midi_message_t& msg, queue<midi_message_t>& queue)
 {
     int transfer_size = transfer->actual_length;
-    int pos = 0;
+    // byte position inside the incoming transfer buffer
+    int input_pos = 0;
 
-    while(pos < transfer_size) {
+    while(input_pos < transfer_size) {
         int event_size = 0;
         if (msg.buffer.empty()) {
-            event_size = midi_event_size(transfer->buffer[pos]);
+            event_size = midi_event_size(transfer->buffer[input_pos]);
         } else {
             event_size = midi_event_size(msg.buffer[0]);
         }
 
-        if (event_size) {
-            int i;
+        if (event_size > 0 && event_size <= msg.buffer.size()) {
+                fprintf(stderr, "ERROR: already complete message contained, but not submitted, event_size: %d, message buffer size: %d\n", event_size, msg.buffer.size());
+                fprintf(stderr, "message buffer: \n");
+                for (int i=0; i < msg.buffer.size(); i++){
+                    fprintf(stderr, " 0x%02x,", msg.buffer[i]);
+                }
+                fputs("\n", stderr);
+                print_libusb_transfer(transfer);
+        }
+
+        if (event_size > 0) {
+            // how many bytes we still need to get in order
+            // for the current midi message to be complete
             int remaining_size = event_size - msg.buffer.size();
 
-            if (pos + remaining_size > transfer_size) {
-                int i;
-                for(i = pos; i < transfer_size; i++) {
-                    msg.buffer.push_back(transfer->buffer[i]);
-                }
-                pos = i;
-                // we're done
-                break;
-            } else if (0 < remaining_size && pos + remaining_size <= transfer_size) {
-                for(i = pos; i < pos + remaining_size; i++) {
-                    msg.buffer.push_back(transfer->buffer[i]);
-                }
-                pos = i;
-                BOOST_ASSERT(event_size == msg.buffer.size());
+            if (remaining_size == 0) {
+                // complete event, submit the message
                 msg.time = time;
                 queue.push(msg);
                 msg.buffer.clear();
-                continue;
-            } else {
-                fprintf(stderr, "ERROR, invalid remaining size %d\n", remaining_size);
+            } else  if (input_pos + remaining_size > transfer_size) {
+                // in this case we received some more bytes for the
+                // current message, but the message is not complete yet
+                // so then append the incoming bytes to the message
+                int i = 0;
+                for (i = input_pos; i < transfer_size; i++) {
+                    msg.buffer.push_back(transfer->buffer[i]);
+                }
+                input_pos = i;
+            } else if (0 <= remaining_size && input_pos + remaining_size <= transfer_size) {
+                // in this case we have received a complete event,
+                // so copy the data over to the message buffer
+                int i = 0;
+                for (i = input_pos; i < input_pos + remaining_size; i++) {
+                    msg.buffer.push_back(transfer->buffer[i]);
+                }
+                input_pos = i;
+                BOOST_ASSERT(event_size == msg.buffer.size());
+                msg.time = time;
+                // and submit the message
+                queue.push(msg);
                 msg.buffer.clear();
-                pos++;
-                continue;
+                // and continue to read the next message from the remaining
+                // input transfer bytes
+            } else {
+                fprintf(stderr, "ERROR, invalid remaining size %d (input_pos: %d, event_size: %d, message buffer size: %d)\n", remaining_size, input_pos, (int)event_size, msg.buffer.size());
+                fprintf(stderr, "message buffer: \n");
+                for (int i=0; i < msg.buffer.size(); i++){
+                    fprintf(stderr, " 0x%02x,", msg.buffer[i]);
+                }
+                fputs("\n", stderr);
+                print_libusb_transfer(transfer);
+                msg.buffer.clear();
             }
         } else {
             // sysex
-            int i;
-            for(i = pos; i < transfer_size; i++) {
+            int i = 0;
+            for (i = input_pos; i < transfer_size; i++) {
                 if (transfer->buffer[i] != 0xf7) {
                     msg.buffer.push_back(transfer->buffer[i]);
                 } else {
@@ -390,34 +417,43 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
                     msg.time = time;
                     queue.push(msg);
                     msg.buffer.clear();
-                    pos = i;
-                    continue;
+                    // account for last byte
+                    i++;
+                    // message complete, break out of for loop
+                    break;
                 }
             }
-            pos = i;
+            input_pos = i;
         }
     }
 }
 
 void cb_controller_out(struct libusb_transfer *transfer)
 {
-    debug && fprintf(stderr, "cb_controller_out: ");
-    print_libusb_transfer(transfer);
+    if (debug) {
+        fprintf(stderr, "cb_controller_out: ");
+        print_libusb_transfer(transfer);
+    }
     libusb_free_transfer(transfer);
 }
 
 void cb_midi_out(struct libusb_transfer *transfer)
 {
-    debug && fprintf(stderr, "cb_midi_out: ");
-    print_libusb_transfer(transfer);
+    if (debug) {
+        fprintf(stderr, "cb_midi_out: ");
+        print_libusb_transfer(transfer);
+    }
     libusb_free_transfer(transfer);
 }
 
 void cb_controller_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &controller_in_t);
-    debug && fprintf(stderr, "cb_controller_in: ");
-    print_libusb_transfer(transfer);
+
+    if (debug) {
+        fprintf(stderr, "cb_controller_in: ");
+        print_libusb_transfer(transfer);
+    }
 
     static midi_message_t msg;
 
@@ -493,8 +529,11 @@ volatile bool aftertouch_seen = false;
 void cb_midi_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &midi_in_t);
-    debug && fprintf(stderr, "cb_midi_in: ");
-    print_libusb_transfer(transfer);
+
+    if (debug) {
+        fprintf(stderr, "cb_midi_in: ");
+        print_libusb_transfer(transfer);
+    }
 
     static midi_message_t msg;
 
@@ -513,7 +552,7 @@ int main(int argc, char *argv[])
 {
     bool control_ardour = false;
 
-    for(int i = 0; i < argc; i++){
+    for (int i = 0; i < argc; i++){
         if (strcmp(argv[i], "--debug") == 0) {
             debug = true;
         } else if (strcmp(argv[i], "--ardour-osc") == 0) {
@@ -699,10 +738,6 @@ void sighandler(int signum)
 // debugging function to display libusb_transfer
 inline void print_libusb_transfer(struct libusb_transfer *p_t)
 {   
-    if (!debug) {
-        return;
-    }
-
     int i;
     if (NULL == p_t) {
         printf("No libusb_transfer...\n");
