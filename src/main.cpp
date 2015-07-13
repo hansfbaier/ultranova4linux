@@ -180,7 +180,7 @@ inline int clamp_to(int value, int from, int to)
 }
 
 std::map<uint8_t, uint8_t> dangling_notes;
-void manipulate_automap_octave(midi_message_t& msg)
+void manipulate_automap(midi_message_t& msg, queue<midi_message_t>& queue)
 {
     if (state == LISTEN) {
         uint8_t orig_note = msg.buffer[1];
@@ -189,13 +189,20 @@ void manipulate_automap_octave(midi_message_t& msg)
         if (IS_NOTE_ON(msg.buffer[0])) {
             dangling_notes[orig_note] = mangled_note;
             msg.buffer[1] = mangled_note;
-        }
-        if (IS_NOTE_OFF(msg.buffer[0])) {
+        } else if (IS_NOTE_OFF(msg.buffer[0])) {
             std::map<uint8_t, uint8_t>::iterator it = dangling_notes.find(orig_note);
             if (it != dangling_notes.end()) {
                 msg.buffer[1] = it->second;
                 dangling_notes.erase(it);
             }
+        } else if (&queue == &controller_queue &&
+                   msg.buffer[0] == 0xb0 &&
+                   msg.buffer[1] >= 0    &&
+                   msg.buffer[1] <= 9) {
+            // 8 rotary touch encoders
+            // add 0x10 so that the second does not conflict
+            // with modwheel
+            msg.buffer[1] += 0x10;
         }
     }
 }
@@ -205,8 +212,8 @@ void manipulate_automap_octave(midi_message_t& msg)
 #define AUTOMAP_BUTTONS 0xb2
 void process_controller_out_message(midi_message_t& msg)
 {
-    if (msg.buffer[0] == AUTOMAP_ENCODERS && msg.buffer[1] < 10) {
-        int encoder_number = msg.buffer[1];
+    if (msg.buffer[0] == AUTOMAP_ENCODERS && msg.buffer[1] >= 0x10 && msg.buffer[1] <= 0x19) {
+        int encoder_number = msg.buffer[1] - 0x10;
         int value = msg.buffer[2];
         if (64 <= value && value <= 127) {
             value = value - 128;
@@ -418,7 +425,7 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
             if (remaining_size == 0) {
                 // complete event, submit the message
                 msg.time = time;
-                manipulate_automap_octave(msg);
+                manipulate_automap(msg, queue);
                 queue.push(msg);
                 msg.buffer.clear();
             } else  if (input_pos + remaining_size > transfer_size) {
@@ -440,7 +447,7 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
                 input_pos = i;
                 BOOST_ASSERT(event_size == msg.buffer.size());
                 msg.time = time;
-                manipulate_automap_octave(msg);
+                manipulate_automap(msg, queue);
                 // and submit the message
                 queue.push(msg);
                 msg.buffer.clear();
