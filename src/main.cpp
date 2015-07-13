@@ -179,9 +179,10 @@ inline int clamp_to(int value, int from, int to)
     return value;
 }
 
-std::map<uint8_t, uint8_t> dangling_notes;
 void manipulate_automap(midi_message_t& msg, queue<midi_message_t>& queue)
 {
+    static std::map<uint8_t, uint8_t> dangling_notes;
+
     if (state == LISTEN) {
         uint8_t orig_note = msg.buffer[1];
         uint8_t mangled_note = clamp_to((int)(orig_note + automap_octave * 12), 0, 127);
