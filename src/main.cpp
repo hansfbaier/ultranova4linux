@@ -179,10 +179,24 @@ inline int clamp_to(int value, int from, int to)
     return value;
 }
 
+std::map<uint8_t, uint8_t> dangling_notes;
 void manipulate_automap_octave(midi_message_t& msg)
 {
-    if (state == LISTEN && (IS_NOTE_ON(msg.buffer[0]) || IS_NOTE_OFF(msg.buffer[0]))) {
-        msg.buffer[1] = clamp_to((int)(msg.buffer[1] + automap_octave * 12), 0, 127);
+    if (state == LISTEN) {
+        uint8_t orig_note = msg.buffer[1];
+        uint8_t mangled_note = clamp_to((int)(orig_note + automap_octave * 12), 0, 127);
+
+       if (IS_NOTE_ON(msg.buffer[0])) {
+            dangling_notes[orig_note] = mangled_note;
+            msg.buffer[1] = mangled_note;
+        }
+        if (IS_NOTE_OFF(msg.buffer[0])) {
+            std::map<uint8_t, uint8_t>::iterator it = dangling_notes.find(orig_note);
+            if (it != dangling_notes.end()) {
+                msg.buffer[1] = it->second;
+                dangling_notes.erase(it);
+            }
+        }
     }
 }
 
