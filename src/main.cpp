@@ -55,11 +55,22 @@ struct timespec controller_in_t;
 struct timespec midi_in_t;
 
 #define SMALL_BUF_SIZE 4
+#define IS_AFTERTOUCH(a) (((a) & 0xf0) == 0xd0)
+#define IS_NOTE_ON(a)    (((a) & 0xf0) == 0x90)
+#define IS_NOTE_OFF(a)   (((a) & 0xf0) == 0x80)
 typedef struct {
     struct timespec time;
     vector<uint8_t> buffer;
 } midi_message_t;
 
+bool is(midi_message_t& msg, uint8_t *buf)
+{
+    for (int i = 0; i < 3; i++) {
+        if (msg.buffer[i] != buf[i]) return false;
+    }
+
+    return true;
+}
 
 // USB to MIDI
 boost::mutex midi_mutex;
@@ -116,6 +127,21 @@ const char* state_names[] = {
     "LISTEN",
 };
 
+int automap_octave = 0;
+
+void set_automap_led(uint8_t led, uint8_t value)
+{
+    static struct libusb_transfer *transfer = NULL;
+    transfer = libusb_alloc_transfer(0);
+    uint8_t buf[] = { 0xb0, led, value };
+
+    libusb_fill_interrupt_transfer(transfer, devh, CONTROLLER_ENDPOINT_OUT,
+                                   buf,
+                                   sizeof(buf),
+                                   cb_controller_out, NULL, 0);
+    libusb_submit_transfer(transfer);
+}
+
 size_t midi_event_size(uint8_t firstByte)
 {
     size_t result = 3;
@@ -152,6 +178,14 @@ inline int clamp_to(int value, int from, int to)
     }
     return value;
 }
+
+void manipulate_automap_octave(midi_message_t& msg)
+{
+    if (state == LISTEN && (IS_NOTE_ON(msg.buffer[0]) || IS_NOTE_OFF(msg.buffer[0]))) {
+        msg.buffer[1] = clamp_to((int)(msg.buffer[1] + automap_octave * 12), 0, 127);
+    }
+}
+
 
 #define AUTOMAP_ENCODERS 0xb0
 #define AUTOMAP_BUTTONS 0xb2
@@ -370,6 +404,7 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
             if (remaining_size == 0) {
                 // complete event, submit the message
                 msg.time = time;
+                manipulate_automap_octave(msg);
                 queue.push(msg);
                 msg.buffer.clear();
             } else  if (input_pos + remaining_size > transfer_size) {
@@ -391,6 +426,7 @@ void process_incoming(struct libusb_transfer *transfer, struct timespec time, mi
                 input_pos = i;
                 BOOST_ASSERT(event_size == msg.buffer.size());
                 msg.time = time;
+                manipulate_automap_octave(msg);
                 // and submit the message
                 queue.push(msg);
                 msg.buffer.clear();
@@ -508,6 +544,12 @@ void cb_controller_in(struct libusb_transfer *transfer)
         } else {
             controller_mutex.lock();
             process_incoming(transfer, controller_in_t, msg, controller_queue);
+            if (is(msg, button_octave_minus)) automap_octave -= 1;
+            if (is(msg, button_octave_plus))  automap_octave += 1;
+            automap_octave = clamp_to(automap_octave, -4, +4);
+            if (automap_octave  > 0)   set_automap_led(led_octave_plus, 1);
+            if (automap_octave == 0) { set_automap_led(led_octave_plus, 0); set_automap_led(led_octave_minus, 0); }
+            if (automap_octave  < 0)   set_automap_led(led_octave_minus, 1);
             controller_mutex.unlock();
         }
         break;
@@ -525,7 +567,6 @@ void cb_controller_in(struct libusb_transfer *transfer)
 
 volatile bool aftertouch_seen = false;
 
-#define IS_AFTERTOUCH(a) (((a) & 0xf0) == 0xd0)
 void cb_midi_in(struct libusb_transfer *transfer)
 {
     clock_gettime(CLOCK_REALTIME, &midi_in_t);
