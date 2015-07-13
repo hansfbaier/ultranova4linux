@@ -186,7 +186,7 @@ void manipulate_automap_octave(midi_message_t& msg)
         uint8_t orig_note = msg.buffer[1];
         uint8_t mangled_note = clamp_to((int)(orig_note + automap_octave * 12), 0, 127);
 
-       if (IS_NOTE_ON(msg.buffer[0])) {
+        if (IS_NOTE_ON(msg.buffer[0])) {
             dangling_notes[orig_note] = mangled_note;
             msg.buffer[1] = mangled_note;
         }
