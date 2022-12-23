@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 #include <vector>
+#include <map>
 #include <queue>
 #include <boost/thread/mutex.hpp>
 #include <boost/assert.hpp>
