@@ -36,6 +36,9 @@ using namespace std;
 
 static bool debug     = false;
 static bool ultranova = true;
+/* claim only interface 3 (automap); MIDI/audio stay with the kernel
+ * snd-usb-audio quirk */
+static bool automap_only = false;
 
 // controller state
 char encoder_states[10];
@@ -366,7 +369,9 @@ int process(jack_nframes_t nframes, void *arg)
     }
 
     void* midi_buf_in_jack = jack_port_get_buffer(midi_in, nframes);
-    jack_to_usb(midi_buf_in_jack, midi_in, midi_endpoint_out, cb_midi_out);
+    if (!automap_only) {
+        jack_to_usb(midi_buf_in_jack, midi_in, midi_endpoint_out, cb_midi_out);
+    }
 
     if (ultranova) {
         controller_mutex.lock();
@@ -621,6 +626,8 @@ int main(int argc, char *argv[])
             debug = true;
         } else if (strcmp(argv[i], "--ardour-osc") == 0) {
             control_ardour = true;
+        } else if (strcmp(argv[i], "--automap-only") == 0) {
+            automap_only = true;
         }
     }
 
@@ -652,8 +659,36 @@ int main(int argc, char *argv[])
         midi_endpoint_out = MININOVA_MIDI_ENDPOINT_OUT;
     }
 
+    /* If the kernel snd-usb-audio driver already claims the MIDI
+     * interface (patched kernel with the UltraNova quirk), do not
+     * fight over the endpoints: run control (automap) only and let
+     * ALSA handle MIDI. */
+    if (!automap_only && ultranova &&
+        libusb_kernel_driver_active(devh, 1) == 1) {
+        fprintf(stderr, "MIDI interface claimed by kernel; running automap-only\n");
+        automap_only = true;
+    }
+
+    /* Mainline snd-usb-audio claims the MiniNova MIDI interface too
+     * (raw bytes on interface 0), and the MiniNova has no automap
+     * interface for this program to serve, so if the kernel already
+     * has it there is nothing left to do: exit cleanly and let the
+     * user use the ALSA MIDI port (bridged to JACK/PipeWire if
+     * needed). */
+    if (!automap_only && !ultranova &&
+        libusb_kernel_driver_active(devh, 0) == 1) {
+        fprintf(stderr, "MiniNova MIDI interface claimed by kernel "
+                        "(snd-usb-audio); MIDI is available via ALSA, "
+                        "nothing for this program to do\n");
+        libusb_close(devh);
+        libusb_exit(NULL);
+        return 0;
+    }
+
     //claim the interface
-    bool success = ultranova ?
+    bool success = automap_only ?
+       libusb_claim_interface(devh, 3) >= 0
+       : ultranova ?
        (libusb_claim_interface(devh, 0) >= 0 &&
         libusb_claim_interface(devh, 1) >= 0 &&
         libusb_claim_interface(devh, 3) >= 0)
@@ -706,15 +741,19 @@ int main(int argc, char *argv[])
                                            in_buffer_control, CONTROLLER_MAXLENGTH,
                                            cb_controller_in, NULL, 0);
         }
-        libusb_fill_interrupt_transfer(midi_transfer_in, devh, midi_endpoint_in,
-                                       in_buffer_midi, LEN_IN_BUFFER,
-                                       cb_midi_in, NULL, 0);
+        if (!automap_only) {
+            libusb_fill_interrupt_transfer(midi_transfer_in, devh, midi_endpoint_in,
+                                           in_buffer_midi, LEN_IN_BUFFER,
+                                           cb_midi_in, NULL, 0);
+        }
 
         //submit the transfer, all following transfers are initiated from the CB
         if (ultranova) {
             libusb_submit_transfer(controller_transfer_in);
         }
-        libusb_submit_transfer(midi_transfer_in);
+        if (!automap_only) {
+            libusb_submit_transfer(midi_transfer_in);
+        }
 
         if (ultranova) {
             struct libusb_transfer *transfer = libusb_alloc_transfer(0);
